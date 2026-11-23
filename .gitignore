@@ -1,0 +1,24 @@
+# Virtual Environments
+venv/
+backend/venv/
+env/
+.env
+
+# Python bytecode and caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Databases
+*.db
+*.sqlite3
+
+# Uploads & User content
+uploads/
+backend/uploads/
+
+# OS specific files
+.DS_Store
+Thumbs.db
