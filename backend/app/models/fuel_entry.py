@@ -7,7 +7,7 @@ Media photos are linked via the 1-to-many relationship with `EntryPhoto`.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -18,7 +18,9 @@ class FuelEntry(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     vehicle_id = Column(String, ForeignKey("vehicles.id"), nullable=False, index=True)
+
     petrol_pump_id = Column(String, ForeignKey("petrol_pumps.id"), nullable=False, index=True)
+    
     operator_id = Column(String, ForeignKey("users.id"), nullable=False)
 
     # Readings and Fuel Volume
@@ -44,7 +46,7 @@ class FuelEntry(Base):
     reviewed_by = Column(String, ForeignKey("users.id"), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     vehicle = relationship("Vehicle")
