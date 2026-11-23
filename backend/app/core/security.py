@@ -7,7 +7,7 @@ This module handles all cryptographic security operations:
 3. Generation of signed JSON Web Tokens (JWT) for stateless user authentication.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Union, Any
 import bcrypt
 from jose import jwt
@@ -25,9 +25,7 @@ def get_password_hash(password: str) -> str:
         str: A secure 60-character bcrypt hash string (e.g. '$2b$12$...').
              This hash is safe to store in the database.
     """
-    # bcrypt requires bytes, so encode password to utf-8. Truncate to 72 bytes as per bcrypt specification.
     pwd_bytes = password.encode("utf-8")[:72]
-    # Generate salt and hash
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(pwd_bytes, salt)
     return hashed.decode("utf-8")
@@ -66,10 +64,11 @@ def create_access_token(subject: Union[str, Any], role: str, expires_delta: Opti
     Returns:
         str: Encoded JWT string to be sent in the HTTP Authorization header (Bearer <token>).
     """
+    now = datetime.now(timezone.utc)
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = now + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     
     to_encode = {
         "exp": expire,
