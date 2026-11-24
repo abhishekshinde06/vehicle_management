@@ -35,7 +35,7 @@ def create_petrol_pump(
     Registers an authorized petrol pump location where fueling is permitted.
     Restricted to Owners.
     """
-    pump = PetrolPump(**pump_in.dict())
+    pump = PetrolPump(**pump_in.model_dump())
     db.add(pump)
     db.commit()
     db.refresh(pump)

@@ -3,15 +3,20 @@ Fuel Entry & Mileage Tracking Routes
 ------------------------------------
 Transactional API routes managing fueling entries and their attached media photos:
 - POST  /api/fuel-entries: Submit a new fueling record with automatic mileage and photos.
+- POST  /api/fuel-entries/upload-photo: Upload live photos (plate, odometer, receipt).
 - GET   /api/fuel-entries: Query fueling logs with filters.
 - GET   /api/fuel-entries/{id}: Retrieve full details of a specific fuel entry with photos.
 - PATCH /api/fuel-entries/{id}/verify: Owner verification (Approve / Reject).
 """
 
-from datetime import datetime
+import os
+import math
+import uuid
+from datetime import datetime, timezone
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from sqlalchemy.orm import Session
+from app.core.config import settings
 from app.core.database import get_db
 from app.models import FuelEntry, Vehicle, PetrolPump, AuditLog, User, EntryPhoto
 from app.schemas.fuel_entry import FuelEntryCreate, FuelEntryResponse, FuelEntryVerify
@@ -22,6 +27,54 @@ from app.core.mileage import calculate_mileage
 from sqlalchemy import func
 
 router = APIRouter()
+
+
+def calculate_haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Calculates great-circle distance between two GPS coordinates in meters.
+    """
+    R = 6371000.0  # Earth radius in meters
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(delta_phi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0) ** 2
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return R * c
+
+
+@router.post("/upload-photo", summary="Upload Live Camera Photo")
+async def upload_photo(
+    file: UploadFile = File(..., description="Image file to upload (JPEG, PNG, WebP)"),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Uploads a photo (e.g. License Plate, Odometer, or Receipt) to server storage.
+    Returns the static URL path for attaching to fuel entries.
+    """
+    allowed_extensions = {".jpg", ".jpeg", ".png", ".webp"}
+    ext = os.path.splitext(file.filename)[1].lower() if file.filename else ".jpg"
+    if ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file format '{ext}'. Allowed: {', '.join(sorted(allowed_extensions))}"
+        )
+
+    filename = f"{uuid.uuid4().hex}{ext}"
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+    file_path = os.path.join(settings.UPLOAD_DIR, filename)
+
+    contents = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(contents)
+
+    return {
+        "filename": filename,
+        "photo_url": f"/uploads/{filename}",
+        "size_bytes": len(contents),
+        "content_type": file.content_type
+    }
 
 
 @router.post("/", response_model=FuelEntryResponse, status_code=status.HTTP_201_CREATED, summary="Submit Fuel Entry")
@@ -37,11 +90,12 @@ def create_fuel_entry(
     1. Checks vehicle exists and is active.
     2. Checks petrol pump exists and is active.
     3. Retrieves previous odometer reading.
-    4. Validates that current odometer > previous odometer (rejects lower readings).
-    5. Calculates distance from the previous fueling entry.
-    6. Calculates full-to-full mileage including intermediate partial refills.
-    7. Creates `FuelEntry` and associated `EntryPhoto` records.
-    8. Records audit log for traceability.
+    4. Validates that current odometer > previous odometer.
+    5. Validates GPS coordinates against the authorized petrol pump geofence.
+    6. Calculates distance from the previous fueling entry.
+    7. Calculates full-to-full mileage including intermediate partial refills.
+    8. Creates `FuelEntry` and associated `EntryPhoto` records.
+    9. Records audit log for traceability.
     """
     # 1. Verify Vehicle
     vehicle = (
@@ -100,7 +154,7 @@ def create_fuel_entry(
     latest_entry = (
         db.query(FuelEntry)
         .filter(FuelEntry.vehicle_id == vehicle.id, FuelEntry.status != "REJECTED")
-        .order_by(FuelEntry.created_at.desc())
+        .order_by(FuelEntry.created_at.desc(), FuelEntry.id.desc())
         .first()
     )
     previous_odometer = latest_entry.current_odometer if latest_entry else vehicle.initial_odometer
@@ -159,7 +213,23 @@ def create_fuel_entry(
                 is_full_tank=True,
             )
 
-    # 6. Save Core Fuel Entry
+    # 6. Geofence & Location Validation (if coordinates provided)
+    distance_from_pump = None
+    is_location_verified = True
+    if entry_in.latitude is not None and entry_in.longitude is not None:
+        distance_from_pump = round(
+            calculate_haversine_distance(
+                entry_in.latitude,
+                entry_in.longitude,
+                pump.latitude,
+                pump.longitude
+            ),
+            1
+        )
+        allowed_radius = pump.radius_meters or settings.DEFAULT_GEOFENCE_RADIUS_METERS
+        is_location_verified = distance_from_pump <= allowed_radius
+
+    # 7. Save Core Fuel Entry
     new_entry = FuelEntry(
         vehicle_id=vehicle.id,
         petrol_pump_id=pump.id,
@@ -180,7 +250,7 @@ def create_fuel_entry(
     db.add(new_entry)
     db.flush()  # Generates new_entry.id
 
-    # 7. Collect and Save Attached Photos in entry_photos table
+    # 8. Collect and Save Attached Photos in entry_photos table
     photos_to_add = []
     # Add from photos list if provided
     if entry_in.photos:
@@ -195,7 +265,7 @@ def create_fuel_entry(
     if photos_to_add:
         db.add_all(photos_to_add)
 
-    # 8. Record Audit Log
+    # 9. Record Audit Log
     log = AuditLog(
         fuel_entry_id=new_entry.id,
         action="CREATED",
@@ -280,7 +350,7 @@ def verify_fuel_entry(
     entry.status = verify_in.status
     entry.rejection_reason = verify_in.rejection_reason if verify_in.status == "REJECTED" else None
     entry.reviewed_by = owner.id
-    entry.reviewed_at = datetime.utcnow()
+    entry.reviewed_at = datetime.now(timezone.utc)
 
     log = AuditLog(
         fuel_entry_id=entry.id,
