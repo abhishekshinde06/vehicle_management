@@ -2,18 +2,17 @@
 Core Business Flow Verification Tests
 -------------------------------------
 Automated integration tests validating:
-1. Fleet Owner self-registration (/api/auth/signup).
-2. Owner-provisioned Operator/Driver creation (/api/auth/create-operator & /api/auth/operators).
-3. RBAC guard: Operators cannot provision other operators.
-4. Operator & Owner authentication (JWT token generation).
-5. Fetching fleet vehicles and authorized petrol pumps via clean /api routes.
-6. Submitting a new fuel entry with odometer, liters, AND photos stored in `entry_photos`.
-7. Automatic distance and mileage (km/L) calculation.
-8. Decreasing odometer sanity validation (preventing invalid entries).
-9. Geofence & GPS distance verification against authorized petrol pump radius.
-10. Live photo upload via `/api/fuel-entries/upload-photo`.
-11. Owner approval workflow with status update and audit trail.
-12. Fleet vehicle and authorized pump creation by owner.
+1. Owner-provisioned Operator/Driver creation (/api/auth/create-operator & /api/auth/operators).
+2. RBAC guard: Operators cannot provision other operators.
+3. Operator & Owner authentication (JWT token generation).
+4. Fetching fleet vehicles and authorized petrol pumps via clean /api routes.
+5. Submitting a new fuel entry with odometer, liters, AND photos stored in `entry_photos`.
+6. Automatic distance and mileage (km/L) calculation.
+7. Decreasing odometer sanity validation (preventing invalid entries).
+8. Geofence & GPS distance verification against authorized petrol pump radius.
+9. Live photo upload via `/api/fuel-entries/upload-photo`.
+10. Owner approval workflow with status update and audit trail.
+11. Fleet vehicle and authorized pump creation by owner.
 """
 
 import io
@@ -36,34 +35,32 @@ def setup_module():
     seed_database()
 
 
-def test_owner_signup_and_operator_provisioning():
+def test_public_signup_disabled_and_operator_provisioning():
     """
-    Test Case 1: Fleet Owner Self-Registration & Operator Provisioning
-    - Fleet Owner signs up at /api/auth/signup (assigned role 'owner').
+    Test Case 1: Disabled Public Signup & Operator Provisioning by Seeded Owner
+    - Asserts that public signup is disabled (POST /api/auth/signup returns 404).
+    - Owner logs in using seeded credentials.
     - Owner provisions a new Operator at /api/auth/create-operator (assigned role 'operator').
     - Owner retrieves list of fleet operators at /api/auth/operators.
     - Operator cannot create another operator (assert 403 Forbidden).
     - Operator logs in with provisioned credentials.
     """
-    # 1. Owner signs up
-    owner_signup_payload = {
-        "username": "new_fleet_owner",
-        "password": "secureownerpassword123",
-        "full_name": "New Fleet Enterprise Owner"
-    }
-    signup_res = client.post("/api/auth/signup", json=owner_signup_payload)
-    assert signup_res.status_code == 201, signup_res.text
-    owner_data = signup_res.json()
-    assert "access_token" in owner_data
+    # 1. Assert public signup is disabled
+    signup_res = client.post("/api/auth/signup", json={
+        "username": "unauthorized_owner",
+        "password": "password123",
+        "full_name": "Unauthorized Owner"
+    })
+    assert signup_res.status_code == 404, "Public signup should be disabled (404 Not Found)"
+
+    # 2. Owner logs in with seeded credentials
+    owner_login_res = client.post("/api/auth/login", data={"username": "owner", "password": "owner123"})
+    assert owner_login_res.status_code == 200, owner_login_res.text
+    owner_data = owner_login_res.json()
     assert owner_data["role"] == "owner"
-    assert owner_data["username"] == "new_fleet_owner"
     owner_headers = {"Authorization": f"Bearer {owner_data['access_token']}"}
 
-    # Duplicate owner signup is rejected
-    dup_res = client.post("/api/auth/signup", json=owner_signup_payload)
-    assert dup_res.status_code == 400
-
-    # 2. Owner provisions an Operator / Driver
+    # 3. Owner provisions an Operator / Driver
     op_payload = {
         "username": "fleet_driver_sunil",
         "password": "driverpassword123",
@@ -75,20 +72,24 @@ def test_owner_signup_and_operator_provisioning():
     assert op_created["username"] == "fleet_driver_sunil"
     assert op_created["role"] == "operator"
 
-    # 3. Owner lists operators
+    # Duplicate username check
+    dup_res = client.post("/api/auth/create-operator", json=op_payload, headers=owner_headers)
+    assert dup_res.status_code == 400
+
+    # 4. Owner lists operators
     list_op_res = client.get("/api/auth/operators", headers=owner_headers)
     assert list_op_res.status_code == 200
     usernames = [u["username"] for u in list_op_res.json()]
     assert "fleet_driver_sunil" in usernames
 
-    # 4. Operator logs in
+    # 5. Operator logs in
     op_login_res = client.post("/api/auth/login", data={"username": "fleet_driver_sunil", "password": "driverpassword123"})
     assert op_login_res.status_code == 200
     op_token = op_login_res.json()["access_token"]
     assert op_login_res.json()["role"] == "operator"
     op_headers = {"Authorization": f"Bearer {op_token}"}
 
-    # 5. Security check: Operator CANNOT create another operator (must fail with 403 Forbidden)
+    # 6. Security check: Operator CANNOT create another operator (must fail with 403 Forbidden)
     forbidden_res = client.post("/api/auth/create-operator", json={
         "username": "rogue_driver",
         "password": "roguepassword123"

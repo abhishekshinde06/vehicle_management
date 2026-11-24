@@ -19,9 +19,26 @@ Re-run safety:
     Safe to re-run at any time — existing records are skipped, never duplicated.
 """
 
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
 from app.core.database import SessionLocal
 from app.core.security import get_password_hash
 from app.models import User, Vehicle, PetrolPump
+
+# Ensure .env is loaded
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(dotenv_path=BASE_DIR / ".env")
+
+# Read initial credentials from environment variables
+OWNER_USERNAME = os.getenv("INITIAL_OWNER_USERNAME", "owner")
+OWNER_PASSWORD = os.getenv("INITIAL_OWNER_PASSWORD", "owner123")
+OWNER_FULL_NAME = os.getenv("INITIAL_OWNER_FULL_NAME", "Fleet Owner (Vikram)")
+
+OPERATOR_USERNAME = os.getenv("INITIAL_OPERATOR_USERNAME", "operator")
+OPERATOR_PASSWORD = os.getenv("INITIAL_OPERATOR_PASSWORD", "operator123")
+OPERATOR_FULL_NAME = os.getenv("INITIAL_OPERATOR_FULL_NAME", "Tablet Operator (Ramesh)")
 
 
 def seed_database():
@@ -29,10 +46,10 @@ def seed_database():
     Populates the database with starter records.
 
     Steps:
-        1. Owner account     — logs in via mobile app to approve/reject entries
-        2. Operator account  — logs in via tablet to submit fuel entries
-        3. Fleet vehicles    — 3 trucks with initial odometer readings
-        4. Petrol pumps      — 2 GPS-registered authorized refueling stops
+        1. Owner account     — credentials loaded from .env
+        2. Operator account  — credentials loaded from .env
+        3. Fleet vehicles    — trucks with initial odometer readings
+        4. Petrol pumps      — GPS-registered authorized refueling stops
     """
     print("=" * 60)
     print("  Vehicle Management — Database Seed")
@@ -41,40 +58,40 @@ def seed_database():
     db = SessionLocal()
     try:
         # ------------------------------------------------------------------
-        # 1. Owner account  (created here — public signup is disabled)
+        # 1. Owner account  (created here from .env)
         # ------------------------------------------------------------------
-        print("\n[1/4] Seeding Owner account...")
-        owner = db.query(User).filter(User.username == "owner").first()
+        print(f"\n[1/4] Seeding Owner account ('{OWNER_USERNAME}')...")
+        owner = db.query(User).filter(User.username == OWNER_USERNAME).first()
         if not owner:
             owner = User(
-                username="owner",
-                password_hash=get_password_hash("owner123"),
+                username=OWNER_USERNAME,
+                password_hash=get_password_hash(OWNER_PASSWORD),
                 role="owner",
-                full_name="Fleet Owner (Vikram)",
+                full_name=OWNER_FULL_NAME,
                 is_active=True,
             )
             db.add(owner)
-            print("  + Created owner  — username: 'owner'    password: 'owner123'")
+            print(f"  + Created owner  — username: '{OWNER_USERNAME}'")
         else:
-            print("  ~ owner already exists, skipped.")
+            print(f"  ~ owner '{OWNER_USERNAME}' already exists, skipped.")
 
         # ------------------------------------------------------------------
-        # 2. Default operator account
+        # 2. Operator account (created here from .env)
         # ------------------------------------------------------------------
-        print("\n[2/4] Seeding default Operator account...")
-        operator = db.query(User).filter(User.username == "operator").first()
+        print(f"\n[2/4] Seeding default Operator account ('{OPERATOR_USERNAME}')...")
+        operator = db.query(User).filter(User.username == OPERATOR_USERNAME).first()
         if not operator:
             operator = User(
-                username="operator",
-                password_hash=get_password_hash("operator123"),
+                username=OPERATOR_USERNAME,
+                password_hash=get_password_hash(OPERATOR_PASSWORD),
                 role="operator",
-                full_name="Tablet Operator (Ramesh)",
+                full_name=OPERATOR_FULL_NAME,
                 is_active=True,
             )
             db.add(operator)
-            print("  + Created operator — username: 'operator' password: 'operator123'")
+            print(f"  + Created operator — username: '{OPERATOR_USERNAME}'")
         else:
-            print("  ~ operator already exists, skipped.")
+            print(f"  ~ operator '{OPERATOR_USERNAME}' already exists, skipped.")
 
         # ------------------------------------------------------------------
         # 3. Fleet vehicles
