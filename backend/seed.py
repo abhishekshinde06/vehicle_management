@@ -8,18 +8,20 @@ Pre-populates the database with initial master data:
 4. Authorized petrol pumps with registered GPS coordinates and radius.
 """
 
-from app.core.database import engine, Base, SessionLocal
+from app.core.database import SessionLocal
 from app.core.security import get_password_hash
-from app.models import User, Vehicle, PetrolPump, FuelEntry, AuditLog
+from app.models import User, Vehicle, PetrolPump
 
 
 def seed_database():
     """
-    Creates database tables if they do not exist and populates starter records.
-    Safe to re-run; will not create duplicate entries.
+    Populates the database with starter records.
+    Safe to re-run — skips any record that already exists.
+
+    NOTE: Run `alembic upgrade head` before running this script
+    to ensure all tables exist.
     """
-    print("[1/4] Ensuring database tables are created...")
-    Base.metadata.create_all(bind=engine)
+    print("[1/4] Connecting to database...")
 
     db = SessionLocal()
     try:
