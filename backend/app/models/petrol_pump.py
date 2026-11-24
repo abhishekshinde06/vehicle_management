@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, Float, Boolean, DateTime
 from app.core.database import Base
 
@@ -13,4 +13,4 @@ class PetrolPump(Base):
     longitude = Column(Float, nullable=False)  # GPS longitude
     radius_meters = Column(Float, default=100.0, nullable=False)  # Allowed geofence radius
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

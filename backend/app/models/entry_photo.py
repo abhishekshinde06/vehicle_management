@@ -13,7 +13,7 @@ Separating photos into a distinct table gives us:
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -26,7 +26,7 @@ class EntryPhoto(Base):
     fuel_entry_id = Column(String, ForeignKey("fuel_entries.id", ondelete="CASCADE"), nullable=False, index=True)
     photo_type = Column(String, nullable=False)  # "PLATE", "ODOMETER", "RECEIPT"
     photo_url = Column(String, nullable=False)   # Relative path or Cloud S3 URL
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Back-reference to the parent FuelEntry
     fuel_entry = relationship("FuelEntry", back_populates="photos")

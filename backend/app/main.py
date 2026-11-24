@@ -14,11 +14,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
-from app.core.database import engine, Base
+from app.core.database import engine, Base  # noqa: F401 — imported so models register
 from app.routes import auth, vehicles, petrol_pumps, fuel_entries
 
-# Ensure all database tables exist on startup
-Base.metadata.create_all(bind=engine)
+# NOTE: Table creation is managed by Alembic migrations.
+# Run `alembic upgrade head` before starting the server.
 
 # Ensure upload directory exists for photos
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)

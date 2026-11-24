@@ -1,8 +1,13 @@
 """
 Database Connection & Session Management
 ----------------------------------------
-Initializes the SQLAlchemy database engine, creates session makers,
-and provides a dependency generator (`get_db`) for FastAPI route handlers.
+Initializes the SQLAlchemy database engine backed by PostgreSQL,
+creates session factories, and provides a dependency generator
+(`get_db`) for FastAPI route handlers.
+
+Connection pooling is handled automatically by SQLAlchemy's
+QueuePool (the default for PostgreSQL). Pool settings below are
+tuned for a small-to-medium production deployment; adjust as needed.
 """
 
 from typing import Generator
@@ -10,17 +15,30 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from app.core.config import settings
 
-# SQLite requires 'check_same_thread: False' because requests run on different threads.
-connect_args = {"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
+# SQLite requires 'check_same_thread: False' (threads differ per request).
+# PostgreSQL has no such limitation, so we pass an empty dict for it.
+_connect_args = {"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {}
 
-# Database Engine: Manages the connection pool to the underlying SQL database
+# ---------------------------------------------------------------------------
+# Database Engine
+# ---------------------------------------------------------------------------
+# pool_pre_ping=True  — verify connections before handing them out (avoids
+#                       "server closed the connection" errors after idle time).
+# pool_size=10        — keep up to 10 persistent connections open.
+# max_overflow=20     — allow up to 20 extra connections under spike load.
+# pool_recycle=1800   — recycle connections after 30 min to dodge timeouts.
+# ---------------------------------------------------------------------------
 engine = create_engine(
     settings.DATABASE_URL,
-    connect_args=connect_args,
-    echo=False
+    connect_args=_connect_args,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20,
+    pool_recycle=1800,
+    echo=False,
 )
 
-# SessionLocal: Factory for creating new database sessions for incoming HTTP requests
+# SessionLocal: Factory for creating new database sessions per HTTP request
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Base: Declarative base class from which all database models inherit
@@ -35,7 +53,8 @@ def get_db() -> Generator[Session, None, None]:
         Session: An active SQLAlchemy database session.
 
     Ensures:
-        The session is guaranteed to close when the HTTP request finishes.
+        The session is guaranteed to close when the HTTP request finishes,
+        even if an exception is raised inside the route handler.
     """
     db = SessionLocal()
     try:

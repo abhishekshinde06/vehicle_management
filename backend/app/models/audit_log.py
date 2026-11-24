@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, DateTime, ForeignKey
 from app.core.database import Base
 
@@ -11,4 +11,4 @@ class AuditLog(Base):
     action = Column(String, nullable=False)  # "CREATED", "APPROVED", "REJECTED", "UPDATED"
     performed_by = Column(String, ForeignKey("users.id"), nullable=False)
     remarks = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

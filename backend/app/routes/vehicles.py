@@ -59,8 +59,16 @@ def create_vehicle(
     if existing:
         raise HTTPException(status_code=400, detail="Vehicle number already registered")
 
-    vehicle = Vehicle(**vehicle_in.dict())
+    vehicle = Vehicle(**vehicle_in.model_dump())
     db.add(vehicle)
     db.commit()
     db.refresh(vehicle)
-    return vehicle
+    return {
+        "id": vehicle.id,
+        "vehicle_number": vehicle.vehicle_number,
+        "model": vehicle.model,
+        "initial_odometer": vehicle.initial_odometer,
+        "latest_odometer": vehicle.initial_odometer,
+        "is_active": vehicle.is_active,
+        "created_at": vehicle.created_at,
+    }
