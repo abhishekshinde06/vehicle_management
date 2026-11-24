@@ -1,6 +1,6 @@
 from typing import Optional, List
 from datetime import datetime
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
 # Schema for an individual attached photo
@@ -29,19 +29,38 @@ class FuelEntryCreate(BaseModel):
     is_full_tank: bool = Field(default=True, description="True if filled to full tank")
 
     # List of attached photos (stored in entry_photos table)
-    photos: Optional[List[EntryPhotoCreate]] = []
-
-    # Optional direct photo URLs (for backward compatibility / quick input)
-    photo_plate_url: Optional[str] = None
-    photo_odometer_url: Optional[str] = None
-    photo_receipt_url: Optional[str] = None
+    photos: List[EntryPhotoCreate] = Field(
+        ...,
+        min_length=3,
+        max_length=3,
+        description="Exactly three photos: PLATE, ODOMETER, RECEIPT"
+    )
+ 
 
     # GPS coordinates for geofencing check
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
-    accuracy_m: Optional[float] = None
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    accuracy_m: float = Field(..., ge=0)
 
+    @model_validator(mode="after")
+    def validate_required_photos(self):
+        """
+        Ensure all three required photo types are provided exactly once.
+        """
+        required_types = {"PLATE", "ODOMETER", "RECEIPT"}
 
+        photo_types = [photo.photo_type for photo in self.photos]
+
+        if set(photo_types) != required_types or len(photo_types) != 3:
+            raise ValueError(
+                "Exactly one PLATE, ODOMETER and RECEIPT photo is required"
+            )
+
+        for photo in self.photos:
+            if not photo.photo_url.strip():
+                raise ValueError("Photo URL cannot be empty")
+
+        return self
 # Schema for Owner verification action
 class FuelEntryVerify(BaseModel):
     status: str = Field(..., pattern="^(APPROVED|REJECTED)$")
