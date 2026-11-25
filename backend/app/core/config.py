@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = os.getenv(
-        "DATABASE_URL"
+        "DATABASE_URL", "sqlite:///./fuel_tracker.db"
     )
 
     # Static photo uploads

@@ -10,7 +10,6 @@ Transactional API routes managing fueling entries and their attached media photo
 """
 
 import os
-import math
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -29,19 +28,7 @@ from sqlalchemy import func
 router = APIRouter()
 
 
-def calculate_haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """
-    Calculates great-circle distance between two GPS coordinates in meters.
-    """
-    R = 6371000.0  # Earth radius in meters
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    delta_phi = math.radians(lat2 - lat1)
-    delta_lambda = math.radians(lon2 - lon1)
 
-    a = math.sin(delta_phi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0) ** 2
-    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
-    return R * c
 
 
 @router.post("/upload-photo", summary="Upload Live Camera Photo")
@@ -213,22 +200,6 @@ def create_fuel_entry(
                 is_full_tank=True,
             )
 
-    # 6. Geofence & Location Validation (if coordinates provided)
-    distance_from_pump = None
-    is_location_verified = True
-    if entry_in.latitude is not None and entry_in.longitude is not None:
-        distance_from_pump = round(
-            calculate_haversine_distance(
-                entry_in.latitude,
-                entry_in.longitude,
-                pump.latitude,
-                pump.longitude
-            ),
-            1
-        )
-        allowed_radius = pump.radius_meters or settings.DEFAULT_GEOFENCE_RADIUS_METERS
-        is_location_verified = distance_from_pump <= allowed_radius
-
     # 7. Save Core Fuel Entry
     new_entry = FuelEntry(
         vehicle_id=vehicle.id,
@@ -282,19 +253,45 @@ def create_fuel_entry(
 @router.get("/", response_model=List[FuelEntryResponse], summary="List Fuel Entries")
 def list_fuel_entries(
     vehicle_id: Optional[str] = Query(None, description="Filter by Vehicle ID"),
+    petrol_pump_id: Optional[str] = Query(None, description="Filter by Petrol Pump ID"),
     status: Optional[str] = Query(None, description="Filter by Status: PENDING, APPROVED, REJECTED"),
+    start_date: Optional[datetime] = Query(None, description="Filter entries created on or after this date"),
+    end_date: Optional[datetime] = Query(None, description="Filter entries created on or before this date"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
     Returns fuel entries sorted by latest first, with optional filters.
     Includes related photos from the `entry_photos` table.
+    Enforces authorization:
+    - Owners can view all fuel entries.
+    - Operators can view only their own fuel entries.
     """
-    query = db.query(FuelEntry).order_by(FuelEntry.created_at.desc())
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid date range: start_date must be before or equal to end_date"
+        )
+
+    query = db.query(FuelEntry).order_by(FuelEntry.created_at.desc(), FuelEntry.id.desc())
+
+    # RBAC: Operators can view only their own fuel entries; Owners can view all
+    if current_user.role != "owner":
+        query = query.filter(FuelEntry.operator_id == current_user.id)
+
     if vehicle_id:
         query = query.filter(FuelEntry.vehicle_id == vehicle_id)
+    if petrol_pump_id:
+        query = query.filter(FuelEntry.petrol_pump_id == petrol_pump_id)
     if status:
         query = query.filter(FuelEntry.status == status.upper())
+    if start_date:
+        query = query.filter(FuelEntry.created_at >= start_date.replace(tzinfo=None))
+    if end_date:
+        clean_end = end_date.replace(tzinfo=None)
+        if clean_end.hour == 0 and clean_end.minute == 0 and clean_end.second == 0 and clean_end.microsecond == 0:
+            clean_end = clean_end.replace(hour=23, minute=59, second=59, microsecond=999999)
+        query = query.filter(FuelEntry.created_at <= clean_end)
 
     entries = query.all()
     results = []
@@ -307,10 +304,20 @@ def list_fuel_entries(
 def get_fuel_entry(id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Fetches details of a specific fuel entry by ID, including all attached photos.
+    Enforces authorization:
+    - Owners can view any fuel entry.
+    - Operators can view only their own fuel entries.
     """
     entry = db.query(FuelEntry).filter(FuelEntry.id == id).first()
     if not entry:
         raise HTTPException(status_code=404, detail="Fuel entry not found")
+
+    if current_user.role != "owner" and entry.operator_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. Operators can only view their own fuel entries."
+        )
+
     return _format_entry_response(entry, entry.vehicle, entry.petrol_pump, entry.operator)
 
 
