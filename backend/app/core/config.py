@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     DEFAULT_GEOFENCE_RADIUS_METERS: float = float(os.getenv("DEFAULT_GEOFENCE_RADIUS_METERS", "100.0"))
     MAX_ALLOWED_GPS_ACCURACY_METERS: float = float(os.getenv("MAX_ALLOWED_GPS_ACCURACY_METERS", "50.0"))
 
+    # AWS S3 Storage
+    USE_S3: bool = os.getenv("USE_S3", "false").lower() in ("true", "1", "yes")
+    AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "")
+    AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+    AWS_REGION: str = os.getenv("AWS_REGION", "ap-southeast-2")
+    S3_BUCKET_NAME: str = os.getenv("S3_BUCKET_NAME", "transporter-fleet-fuel-bucket")
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_PATH),
         env_file_encoding="utf-8",
