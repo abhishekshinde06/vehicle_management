@@ -18,6 +18,7 @@ Design decisions (MVP / single-transporter):
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import verify_password, create_access_token, get_password_hash
@@ -134,8 +135,15 @@ def create_operator(
         is_active=True,
     )
     db.add(operator)
-    db.commit()
-    db.refresh(operator)
+    try:
+        db.commit()
+        db.refresh(operator)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Username '{username}' is already taken.",
+        )
     return operator
 
 

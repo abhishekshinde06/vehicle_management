@@ -9,8 +9,10 @@ Tests for /api/petrol-pumps endpoints:
   4. test_create_petrol_pump_as_owner           — POST / as owner successfully creates pump (201)
   5. test_create_petrol_pump_duplicate_name     — POST / with duplicate name (case-insensitive) -> 400
   6. test_create_petrol_pump_duplicate_coords   — POST / with duplicate GPS coords -> 400
-  7. test_create_petrol_pump_as_operator_forbidden — POST / as operator -> 403 Forbidden
-  8. test_create_petrol_pump_unauthenticated   — POST / without token -> 401
+  7. test_create_petrol_pump_nearby_within_distance_threshold — POST / within 50m of existing pump -> 400
+  8. test_create_petrol_pump_far_enough_succeeds — POST / with >50m separation succeeds (201)
+  9. test_create_petrol_pump_as_operator_forbidden — POST / as operator -> 403 Forbidden
+  10. test_create_petrol_pump_unauthenticated   — POST / without token -> 401
 """
 
 import pytest
@@ -157,7 +159,38 @@ class TestCreatePetrolPump:
         }
         res = client.post("/api/petrol-pumps/", json=payload, headers=owner_headers)
         assert res.status_code == 400
-        assert "coordinates" in res.json()["detail"].lower()
+        assert "location" in res.json()["detail"].lower() or "coordinates" in res.json()["detail"].lower()
+
+    def test_create_petrol_pump_nearby_within_distance_threshold(self, client, owner_headers):
+        """
+        Attempting to register a pump merely ~11 meters away from an existing pump
+        must be rejected by distance-based duplicate validation (threshold: 50m).
+        """
+        # ~0.0001 degrees lat is approx 11 meters
+        payload = {
+            "name": "Nearby BPCL Pump Duplicate",
+            "address": "Right next to Urse Toll Plaza",
+            "latitude": 18.7305 + 0.0001,
+            "longitude": 73.6552,
+            "radius_meters": 100.0
+        }
+        res = client.post("/api/petrol-pumps/", json=payload, headers=owner_headers)
+        assert res.status_code == 400
+        assert "physical location" in res.json()["detail"].lower()
+        assert "minimum required separation" in res.json()["detail"].lower()
+
+    def test_create_petrol_pump_far_enough_succeeds(self, client, owner_headers):
+        """Registering a pump far away (> 50m separation) succeeds cleanly."""
+        payload = {
+            "name": "Distinct Location Pump Station",
+            "address": "Pune-Solapur Highway",
+            "latitude": 18.5204,
+            "longitude": 73.8567,
+            "radius_meters": 120.0
+        }
+        res = client.post("/api/petrol-pumps/", json=payload, headers=owner_headers)
+        assert res.status_code == 201
+        assert res.json()["name"] == "Distinct Location Pump Station"
 
     def test_create_petrol_pump_as_operator_forbidden(self, client, operator_headers):
         """Operators cannot register petrol pumps; returns 403 Forbidden."""

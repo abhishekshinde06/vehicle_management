@@ -8,7 +8,7 @@ Media photos are linked via the 1-to-many relationship with `EntryPhoto`.
 
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Float, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, String, Float, Boolean, DateTime, ForeignKey, Index
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -56,3 +56,9 @@ class FuelEntry(Base):
 
     # 1-to-Many relationship with EntryPhoto (Cascades deletion if an entry is removed)
     photos = relationship("EntryPhoto", back_populates="fuel_entry", cascade="all, delete-orphan", lazy="joined")
+
+    __table_args__ = (
+        # Prevent exact duplicate concurrent submissions for the same vehicle at the same odometer
+        # and not rejected
+        Index("ix_fuel_entries_vehicle_odometer", "vehicle_id", "current_odometer"),
+    )

@@ -8,6 +8,7 @@ Routes for querying fleet vehicles and their current odometer status:
 
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models import Vehicle, FuelEntry
@@ -54,15 +55,25 @@ def create_vehicle(
     """
     Adds a new vehicle to the fleet with an initial odometer reading.
     Restricted to Owners.
+    Handles duplicate vehicle number with database-level IntegrityError rollback.
     """
+    # 1. Application-level check
     existing = db.query(Vehicle).filter(Vehicle.vehicle_number == vehicle_in.vehicle_number).first()
     if existing:
         raise HTTPException(status_code=400, detail="Vehicle number already registered")
 
     vehicle = Vehicle(**vehicle_in.model_dump())
     db.add(vehicle)
-    db.commit()
-    db.refresh(vehicle)
+    try:
+        db.commit()
+        db.refresh(vehicle)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Vehicle with number '{vehicle_in.vehicle_number}' already exists."
+        )
+
     return {
         "id": vehicle.id,
         "vehicle_number": vehicle.vehicle_number,
