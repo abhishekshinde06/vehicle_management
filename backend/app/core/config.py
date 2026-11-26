@@ -36,8 +36,9 @@ class Settings(BaseSettings):
         "DATABASE_URL", "sqlite:///./fuel_tracker.db"
     )
 
-    # Static photo uploads
+    # Photo uploads & validation
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "./uploads")
+    MAX_IMAGE_SIZE_BYTES: int = int(os.getenv("MAX_IMAGE_SIZE_BYTES", str(5 * 1024 * 1024)))
 
     # Geofencing configurations
     DEFAULT_GEOFENCE_RADIUS_METERS: float = float(os.getenv("DEFAULT_GEOFENCE_RADIUS_METERS", "100.0"))

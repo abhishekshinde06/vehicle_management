@@ -4,10 +4,30 @@ from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict, model_validator, field_validator
 
 
-# Schema for an individual attached photo
+class UploadedPhotoResponse(BaseModel):
+    id: str
+    photo_id: str
+    photo_type: str
+    photo_url: str
+    storage_type: str
+    is_used: bool
+    size_bytes: int
+    content_type: str
+    created_at: datetime
+
+
+# Schema for an individual attached photo in a fuel entry
 class EntryPhotoBase(BaseModel):
-    photo_type: str = Field(..., pattern="^(PLATE|ODOMETER|RECEIPT)$", description="Type of photo: PLATE, ODOMETER, or RECEIPT")
-    photo_url: str = Field(..., min_length=1, description="Storage URL or relative path to the image")
+    photo_type: str = Field(
+        ...,
+        pattern="^(PLATE|ODOMETER|RECEIPT)$",
+        description="Type of photo: PLATE, ODOMETER, or RECEIPT",
+    )
+    photo_url: str = Field(
+        ...,
+        min_length=1,
+        description="Authenticated retrieval URL for the photo",
+    )
 
     model_config = ConfigDict(extra="forbid")
 
@@ -19,12 +39,53 @@ class EntryPhotoBase(BaseModel):
         return v.strip()
 
 
-class EntryPhotoCreate(EntryPhotoBase):
-    pass
+class EntryPhotoCreate(BaseModel):
+    photo_type: str = Field(
+        ...,
+        pattern="^(PLATE|ODOMETER|RECEIPT)$",
+        description="Type of photo: PLATE, ODOMETER, or RECEIPT",
+    )
+    photo_id: Optional[str] = Field(
+        default=None,
+        description="UUID of the uploaded photo returned by /upload-photo",
+    )
+    photo_url: Optional[str] = Field(
+        default=None,
+        description="Authenticated retrieval URL returned by /upload-photo",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("photo_url")
+    @classmethod
+    def validate_photo_url_not_blank(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Photo URL cannot be empty or blank")
+        return stripped
+
+    @field_validator("photo_id")
+    @classmethod
+    def validate_photo_id_not_blank(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Photo ID cannot be empty or blank")
+        return stripped
+
+    @model_validator(mode="after")
+    def validate_photo_reference_present(self):
+        if self.photo_id is None and self.photo_url is None:
+            raise ValueError("Either photo_id or photo_url must be provided")
+        return self
 
 
 class EntryPhotoResponse(EntryPhotoBase):
     id: str
+    uploaded_photo_id: Optional[str] = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True, extra="ignore")
@@ -34,16 +95,22 @@ class EntryPhotoResponse(EntryPhotoBase):
 class FuelEntryCreate(BaseModel):
     vehicle_id: str
     petrol_pump_id: str
-    current_odometer: float = Field(..., gt=0, allow_inf_nan=False, description="Current odometer reading")
-    fuel_litres: float = Field(..., gt=0, allow_inf_nan=False, description="Fuel filled in litres")
-    is_full_tank: bool = Field(default=True, description="True if filled to full tank")
+    current_odometer: float = Field(
+        ..., gt=0, allow_inf_nan=False, description="Current odometer reading"
+    )
+    fuel_litres: float = Field(
+        ..., gt=0, allow_inf_nan=False, description="Fuel filled in litres"
+    )
+    is_full_tank: bool = Field(
+        default=True, description="True if filled to full tank"
+    )
 
     # List of attached photos (stored in entry_photos table)
     photos: List[EntryPhotoCreate] = Field(
         ...,
         min_length=3,
         max_length=3,
-        description="Exactly three photos: PLATE, ODOMETER, RECEIPT"
+        description="Exactly three photos: PLATE, ODOMETER, RECEIPT",
     )
 
     # GPS coordinates for geofencing check
@@ -53,7 +120,14 @@ class FuelEntryCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    @field_validator("current_odometer", "fuel_litres", "accuracy_m", "latitude", "longitude", mode="before")
+    @field_validator(
+        "current_odometer",
+        "fuel_litres",
+        "accuracy_m",
+        "latitude",
+        "longitude",
+        mode="before",
+    )
     @classmethod
     def validate_finite_numbers(cls, v):
         if isinstance(v, (int, float)) and not math.isfinite(v):
@@ -64,7 +138,7 @@ class FuelEntryCreate(BaseModel):
     def validate_required_photos(self):
         """
         Ensure all three required photo types are provided exactly once,
-        with non-empty and non-duplicate URLs.
+        with non-empty and non-duplicate references.
         """
         required_types = {"PLATE", "ODOMETER", "RECEIPT"}
 
@@ -81,16 +155,28 @@ class FuelEntryCreate(BaseModel):
             )
 
         urls = []
+        photo_ids = []
         for photo in self.photos:
-            stripped_url = photo.photo_url.strip() if photo.photo_url else ""
-            if not stripped_url:
-                raise ValueError("Photo URL cannot be empty")
-            urls.append(stripped_url)
+            if photo.photo_url is not None:
+                stripped_url = photo.photo_url.strip()
+                if not stripped_url:
+                    raise ValueError("Photo URL cannot be empty")
+                urls.append(stripped_url)
+            if photo.photo_id is not None:
+                stripped_id = photo.photo_id.strip()
+                if not stripped_id:
+                    raise ValueError("Photo ID cannot be empty")
+                photo_ids.append(stripped_id)
 
         if len(set(urls)) != len(urls):
             raise ValueError("Duplicate photo URLs are not allowed")
 
+        if len(set(photo_ids)) != len(photo_ids):
+            raise ValueError("Duplicate photo IDs are not allowed")
+
         return self
+
+
 # Schema for Owner verification action
 class FuelEntryVerify(BaseModel):
     status: str = Field(..., pattern="^(APPROVED|REJECTED)$")

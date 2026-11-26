@@ -33,7 +33,8 @@ from jose import jwt
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-
+import io
+from PIL import Image
 from app.main import app as fastapi_app
 from app.core.config import settings
 from app.core.database import Base, get_db
@@ -41,8 +42,9 @@ from app.models import User, Vehicle, PetrolPump, FuelEntry, EntryPhoto
 
 
 @pytest.fixture
-def isolated_client():
-    """Create an isolated in-memory database for testing access control and filters."""
+def isolated_client(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "USE_S3", False)
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
     test_engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -79,7 +81,35 @@ def make_token(user_id: str, role: str) -> str:
         algorithm=settings.ALGORITHM,
     )
 
+def upload_three_photos(client, headers):
+    photos = []
 
+    for photo_type in ("PLATE", "ODOMETER", "RECEIPT"):
+        buffer = io.BytesIO()
+
+        Image.new("RGB", (100, 100), "white").save(
+            buffer, format="JPEG"
+        )
+
+        buffer.seek(0)
+
+        response = client.post(
+            "/api/fuel-entries/upload-photo",
+            headers=headers,
+            data={"photo_type": photo_type},
+            files={
+                "file": ("test.jpg", buffer, "image/jpeg")
+            },
+        )
+
+        assert response.status_code == 200, response.text
+
+        photos.append({
+            "photo_type": photo_type,
+            "photo_url": response.json()["photo_url"],
+        })
+
+    return photos
 def test_operator_access_restrictions(isolated_client):
     """
     Operators must see only their own entries in list and detail endpoints.
@@ -134,11 +164,7 @@ def test_operator_access_restrictions(isolated_client):
             "latitude": 18.5001,
             "longitude": 73.8001,
             "accuracy_m": 10.0,
-            "photos": [
-                {"photo_type": "PLATE", "photo_url": "/uploads/p1.jpg"},
-                {"photo_type": "ODOMETER", "photo_url": "/uploads/o1.jpg"},
-                {"photo_type": "RECEIPT", "photo_url": "/uploads/r1.jpg"}
-            ]
+            "photos": upload_three_photos(client, op1_headers)
         }
     )
     assert res1.status_code == 201, res1.text
@@ -157,11 +183,7 @@ def test_operator_access_restrictions(isolated_client):
             "latitude": 18.5001,
             "longitude": 73.8001,
             "accuracy_m": 10.0,
-            "photos": [
-                {"photo_type": "PLATE", "photo_url": "/uploads/p2.jpg"},
-                {"photo_type": "ODOMETER", "photo_url": "/uploads/o2.jpg"},
-                {"photo_type": "RECEIPT", "photo_url": "/uploads/r2.jpg"}
-            ]
+            "photos": upload_three_photos(client, op2_headers)
         }
     )
     assert res2.status_code == 201, res2.text

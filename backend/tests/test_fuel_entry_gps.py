@@ -8,6 +8,7 @@ using an isolated in-memory SQLite database.
 
 import os
 import tempfile
+import uuid
 
 # Configure a temporary database before importing the application.
 _test_db_dir = tempfile.TemporaryDirectory()
@@ -26,7 +27,35 @@ import app.models
 from app.main import app as fastapi_app
 from app.core.config import settings
 from app.core.database import Base, get_db
-from app.models import User, Vehicle, PetrolPump, FuelEntry
+from app.models import User, Vehicle, PetrolPump, FuelEntry, UploadedPhoto
+
+
+def seed_three_photos(TestingSession, uploader_id: str):
+    """Creates three unused UploadedPhoto records and returns the API payload list."""
+    photos = []
+    with TestingSession() as db:
+        for ptype in ("PLATE", "ODOMETER", "RECEIPT"):
+            pid = str(uuid.uuid4())
+            db.add(
+                UploadedPhoto(
+                    id=pid,
+                    uploader_id=uploader_id,
+                    photo_type=ptype,
+                    storage_type="local",
+                    storage_reference=f"{pid}.jpg",
+                    content_type="image/jpeg",
+                    size_bytes=1024,
+                    is_used=False,
+                )
+            )
+            photos.append(
+                {
+                    "photo_type": ptype,
+                    "photo_url": f"{settings.API_PREFIX}/fuel-entries/photos/{pid}",
+                }
+            )
+        db.commit()
+    return photos
 
 
 @pytest.fixture
@@ -146,11 +175,7 @@ def test_fuel_entry_gps_validation(test_client):
     "current_odometer": 1100,
     "fuel_litres": 20,
     "is_full_tank": True,
-    "photos": [
-        {"photo_type": "PLATE", "photo_url": "/uploads/test_plate.jpg"},
-        {"photo_type": "ODOMETER", "photo_url": "/uploads/test_odometer.jpg"},
-        {"photo_type": "RECEIPT", "photo_url": "/uploads/test_receipt.jpg"},
-    ],
+    "photos": seed_three_photos(TestingSession, operator_id),
     }
 
     # 3. Missing GPS -> 422
@@ -338,20 +363,6 @@ def test_full_to_full_mileage(test_client):
         "latitude": 23.2599,
         "longitude": 77.4126,
         "accuracy_m": 10,
-        "photos": [
-            {
-                "photo_type": "PLATE",
-                "photo_url": "/uploads/plate.jpg",
-            },
-            {
-                "photo_type": "ODOMETER",
-                "photo_url": "/uploads/odometer.jpg",
-            },
-            {
-                "photo_type": "RECEIPT",
-                "photo_url": "/uploads/receipt.jpg",
-            },
-        ],
     }
 
     # Odometer, litres, full tank, expected mileage.
@@ -373,6 +384,7 @@ def test_full_to_full_mileage(test_client):
                 "current_odometer": odometer,
                 "fuel_litres": litres,
                 "is_full_tank": full_tank,
+                "photos": seed_three_photos(TestingSession, operator_id),
             },
         )
 
@@ -392,6 +404,7 @@ def test_full_to_full_mileage(test_client):
             "current_odometer": 46200,
             "fuel_litres": 100,
             "is_full_tank": True,
+            "photos": seed_three_photos(TestingSession, operator_id),
         },
     )
 
@@ -457,11 +470,6 @@ def test_owner_review_and_mileage(test_client):
         "latitude": 23.2599,
         "longitude": 77.4126,
         "accuracy_m": 10,
-        "photos": [
-            {"photo_type": "PLATE", "photo_url": "plate.jpg"},
-            {"photo_type": "ODOMETER", "photo_url": "odometer.jpg"},
-            {"photo_type": "RECEIPT", "photo_url": "receipt.jpg"},
-        ],
     }
 
     entry_ids = []
@@ -480,6 +488,7 @@ def test_owner_review_and_mileage(test_client):
                 "current_odometer": odometer,
                 "fuel_litres": litres,
                 "is_full_tank": full_tank,
+                "photos": seed_three_photos(TestingSession, operator_id),
             },
         )
 

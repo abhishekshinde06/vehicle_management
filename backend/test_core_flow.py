@@ -29,7 +29,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-
+from PIL import Image
+from app.core.config import settings
 from app.main import app
 from app.core.database import Base, get_db
 from app.core.security import get_password_hash
@@ -244,25 +245,72 @@ def test_login_owner():
     data = res.json()
     assert "access_token" in data
     assert data["role"] == "owner"
+@pytest.fixture(autouse=True)
+def isolate_photo_storage(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "USE_S3", False)
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
 
+
+def upload_test_photo(client, headers, photo_type):
+    buffer = io.BytesIO()
+
+    Image.new("RGB", (100, 100), "white").save(
+        buffer, format="JPEG"
+    )
+
+    buffer.seek(0)
+
+    response = client.post(
+        "/api/fuel-entries/upload-photo",
+        data={"photo_type": photo_type},
+        files={
+            "file": ("test.jpg", buffer, "image/jpeg")
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def upload_three_photos(client, headers):
+    return [
+        {
+            "photo_type": photo_type,
+            "photo_url": upload_test_photo(
+                client, headers, photo_type
+            )["photo_url"],
+        }
+        for photo_type in ("PLATE", "ODOMETER", "RECEIPT")
+    ]
 
 def test_photo_upload():
-    """
-    Test Case 4: Live Camera Photo Upload
-    - Uploads a test JPEG file to /api/fuel-entries/upload-photo.
-    - Asserts 200 OK status.
-    - Confirms generated URL points to /uploads/<file>.
-    """
-    login = client.post("/api/auth/login", data={"username": "operator", "password": "operator123"}).json()
-    headers = {"Authorization": f"Bearer {login['access_token']}"}
+    login = client.post(
+        "/api/auth/login",
+        data={
+            "username": "operator",
+            "password": "operator123",
+        },
+    ).json()
 
-    file_bytes = b"fake image bytes for testing plate photo"
-    files = {"file": ("camera_plate.jpg", io.BytesIO(file_bytes), "image/jpeg")}
-    upload_res = client.post("/api/fuel-entries/upload-photo", files=files, headers=headers)
-    assert upload_res.status_code == 200, upload_res.text
-    data = upload_res.json()
+    headers = {
+        "Authorization": f"Bearer {login['access_token']}"
+    }
+
+    data = upload_test_photo(client, headers, "PLATE")
+
+    assert "photo_id" in data
     assert "photo_url" in data
-    assert data["photo_url"].startswith("/uploads/")
+
+    assert data["photo_url"].startswith(
+        "/api/fuel-entries/photos/"
+    )
+
+    assert client.get(
+        data["photo_url"], headers=headers
+    ).status_code == 200
+
+    assert client.get(data["photo_url"]).status_code == 401
 
 
 def test_fuel_entry_and_mileage_calculation():
@@ -310,12 +358,7 @@ def test_fuel_entry_and_mileage_calculation():
         "latitude": pump["latitude"] + 0.0001,  # ~11 meters away
         "longitude": pump["longitude"] + 0.0001,
         "accuracy_m": 10.0,
-        "photos": [
-            {"photo_type": "PLATE", "photo_url": "/uploads/test_plate.jpg"},
-            {"photo_type": "ODOMETER", "photo_url": "/uploads/test_odometer.jpg"},
-            {"photo_type": "RECEIPT", "photo_url": "/uploads/test_receipt.jpg"}
-        ]
-    }
+        "photos": upload_three_photos(client, headers)    }
 
     create_res = client.post("/api/fuel-entries/", json=entry_payload, headers=headers)
     assert create_res.status_code == 201, create_res.text
