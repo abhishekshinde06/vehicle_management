@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
@@ -192,8 +193,15 @@ def create_fuel_entry(
         remarks=f"Fuel entry recorded by '{current_user.username}' for vehicle '{vehicle.vehicle_number}' with {len(photos_to_add)} photo(s)"
     )
     db.add(log)
-    db.commit()
-    db.refresh(new_entry)
+    try:
+        db.commit()
+        db.refresh(new_entry)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to record fuel entry due to a duplicate conflict or database constraint violation. Please verify entry details."
+        )
 
     return _format_entry_response(new_entry, vehicle, pump, current_user)
 
