@@ -24,6 +24,7 @@ from app.core.geofence import calculate_distance_m, verify_geofence
 from app.schemas.geofence import GeofenceVerifyRequest
 from app.core.mileage import calculate_mileage
 from sqlalchemy import func
+from app.services.storage import save_image,get_viewable_url
 
 router = APIRouter()
 
@@ -49,21 +50,12 @@ async def upload_photo(
         )
 
     filename = f"{uuid.uuid4().hex}{ext}"
-    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-    file_path = os.path.join(settings.UPLOAD_DIR, filename)
-
     contents = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(contents)
+    content_type = file.content_type or "image/jpeg"
 
-    return {
-        "filename": filename,
-        "photo_url": f"/uploads/{filename}",
-        "size_bytes": len(contents),
-        "content_type": file.content_type
-    }
-
-
+    # Save to S3 (or local storage fallback)
+    result = save_image(contents=contents, filename=filename, content_type=content_type)
+    return result
 @router.post("/", response_model=FuelEntryResponse, status_code=status.HTTP_201_CREATED, summary="Submit Fuel Entry")
 def create_fuel_entry(
     entry_in: FuelEntryCreate,
@@ -442,18 +434,20 @@ def _format_entry_response(entry: FuelEntry, vehicle: Vehicle, pump: PetrolPump,
 
     if entry.photos:
         for p in entry.photos:
+            # Generate temporary secure viewing link if private S3
+            viewable_url = get_viewable_url(p.photo_url)
             photos_data.append({
                 "id": p.id,
                 "photo_type": p.photo_type,
-                "photo_url": p.photo_url,
+                "photo_url": viewable_url,
                 "created_at": p.created_at
             })
             if p.photo_type == "PLATE" and not plate_url:
-                plate_url = p.photo_url
+                plate_url = viewable_url
             elif p.photo_type == "ODOMETER" and not odometer_url:
-                odometer_url = p.photo_url
+                odometer_url = viewable_url
             elif p.photo_type == "RECEIPT" and not receipt_url:
-                receipt_url = p.photo_url
+                receipt_url = viewable_url
 
     return {
         "id": entry.id,
