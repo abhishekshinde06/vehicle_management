@@ -40,6 +40,14 @@ class FuelEntry(Base):
     distance_from_pump_m = Column(Float, nullable=True)
     is_location_verified = Column(Boolean, default=True)
 
+    # OCR Verification & Review Flagging
+    ocr_odometer_status = Column(String, nullable=True)  # "MATCH", "MISMATCH", "UNREADABLE"
+    ocr_odometer_value = Column(Float, nullable=True)
+    ocr_fuel_status = Column(String, nullable=True)      # "MATCH", "MISMATCH", "UNREADABLE"
+    ocr_fuel_value = Column(Float, nullable=True)
+    needs_manual_review = Column(Boolean, nullable=False, default=False)
+    ocr_notes = Column(String, nullable=True)
+
     # Verification Workflow
     status = Column(String, default="PENDING", index=True)  # "PENDING", "APPROVED", "REJECTED"
     rejection_reason = Column(String, nullable=True)

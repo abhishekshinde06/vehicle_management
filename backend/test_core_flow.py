@@ -16,23 +16,140 @@ Automated integration tests validating:
 """
 
 import io
+import os
+import tempfile
 import pytest
-from fastapi.testclient import TestClient
-from app.main import app
-from app.core.database import Base, engine
-from seed import seed_database
 
+# Create an isolated temporary test database (never drops or modifies the application database)
+_test_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+_test_db.close()
+os.environ["DATABASE_URL"] = f"sqlite:///{_test_db.name}"
+
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from PIL import Image
+from app.core.config import settings
+from app.main import app
+from app.core.database import Base, get_db
+from app.core.security import get_password_hash
+from app.models import User, Vehicle, PetrolPump, FuelEntry, AuditLog
+
+test_engine = create_engine(
+    f"sqlite:///{_test_db.name}",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool
+)
+TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+
+def override_get_db():
+    db = TestSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+app.dependency_overrides[get_db] = override_get_db
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def ensure_test_db_override():
+    """Ensure the isolated test database dependency override is active for every test."""
+    app.dependency_overrides[get_db] = override_get_db
+    yield
+    app.dependency_overrides.pop(get_db, None)
 
 
 def setup_module():
     """
     Setup hook executed once before running the test suite:
-    Resets tables and re-seeds the database to ensure a clean, isolated test environment.
+    Resets tables on isolated test_engine and seeds test records.
+    Never drops or modifies the actual application database.
     """
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
-    seed_database()
+    Base.metadata.drop_all(bind=test_engine)
+    Base.metadata.create_all(bind=test_engine)
+
+    db = TestSessionLocal()
+    try:
+        op = User(
+            username="operator",
+            password_hash=get_password_hash("operator123"),
+            role="operator",
+            full_name="Tablet Operator (Ramesh)",
+            is_active=True
+        )
+        owner = User(
+            username="owner",
+            password_hash=get_password_hash("owner123"),
+            role="owner",
+            full_name="Fleet Owner (Vikram)",
+            is_active=True
+        )
+        db.add_all([op, owner])
+
+        vehicles = [
+            Vehicle(vehicle_number="MH-12-AB-1001", model="Tata Prima 4028.S", initial_odometer=44000.0),
+            Vehicle(vehicle_number="MH-14-XY-2002", model="Ashok Leyland 3118", initial_odometer=72500.0),
+            Vehicle(vehicle_number="MH-46-TR-3003", model="BharatBenz 2823R", initial_odometer=28900.0),
+        ]
+        db.add_all(vehicles)
+        db.flush()
+
+        pumps = [
+            PetrolPump(
+                name="Bharat Petroleum - Highway Hub",
+                address="NH-48, Near Expressway Toll, Pune",
+                latitude=18.5204,
+                longitude=73.8567,
+                radius_meters=150.0
+            ),
+            PetrolPump(
+                name="Indian Oil - Transporter Hub",
+                address="Transport Nagar, Nigdi, Pune",
+                latitude=18.6510,
+                longitude=73.7820,
+                radius_meters=100.0
+            )
+        ]
+        db.add_all(pumps)
+        db.flush()
+
+        # Seed initial baseline full-tank entry for first vehicle at 45000 km
+        baseline = FuelEntry(
+            vehicle_id=vehicles[0].id,
+            petrol_pump_id=pumps[0].id,
+            operator_id=op.id,
+            current_odometer=45000.0,
+            previous_odometer=44000.0,
+            fuel_litres=100.0,
+            is_full_tank=True,
+            distance_km=1000.0,
+            mileage_kmpl=None,
+            latitude=18.5204,
+            longitude=73.8567,
+            accuracy_m=10.0,
+            distance_from_pump_m=0.0,
+            is_location_verified=True,
+            status="APPROVED"
+        )
+        db.add(baseline)
+
+        db.commit()
+    finally:
+        db.close()
+
+
+def teardown_module():
+    app.dependency_overrides.pop(get_db, None)
+    Base.metadata.drop_all(bind=test_engine)
+    test_engine.dispose()
+    if os.path.exists(_test_db.name):
+        try:
+            os.remove(_test_db.name)
+        except OSError:
+            pass
 
 
 def test_public_signup_disabled_and_operator_provisioning():
@@ -128,25 +245,102 @@ def test_login_owner():
     data = res.json()
     assert "access_token" in data
     assert data["role"] == "owner"
+@pytest.fixture(autouse=True)
+def isolate_photo_storage(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "USE_S3", False)
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
 
+
+def get_gps_token(client, headers, pump):
+    response = client.post(
+        "/api/fuel-entries/verify-location",
+        headers=headers,
+        json={
+            "petrol_pump_id": pump["id"],
+            "latitude": pump["latitude"],
+            "longitude": pump["longitude"],
+            "accuracy_m": 10.0,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    return response.json()["gps_verification_token"]
+
+
+def upload_test_photo(client, headers, photo_type, pump_id, gps_token):
+    buffer = io.BytesIO()
+
+    Image.new("RGB", (100, 100), "white").save(
+        buffer, format="JPEG"
+    )
+
+    buffer.seek(0)
+
+    response = client.post(
+        "/api/fuel-entries/upload-photo",
+        data={
+            "photo_type": photo_type,
+            "petrol_pump_id": pump_id,
+            "gps_verification_token": gps_token,
+        },
+        files={
+            "file": ("test.jpg", buffer, "image/jpeg")
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def upload_three_photos(client, headers, pump_id, gps_token):
+    return [
+        {
+            "photo_type": photo_type,
+            "photo_url": upload_test_photo(
+                client, headers, photo_type, pump_id, gps_token
+            )["photo_url"],
+        }
+        for photo_type in ("PLATE", "ODOMETER", "RECEIPT")
+    ]
 
 def test_photo_upload():
-    """
-    Test Case 4: Live Camera Photo Upload
-    - Uploads a test JPEG file to /api/fuel-entries/upload-photo.
-    - Asserts 200 OK status.
-    - Confirms generated URL points to /uploads/<file>.
-    """
-    login = client.post("/api/auth/login", data={"username": "operator", "password": "operator123"}).json()
-    headers = {"Authorization": f"Bearer {login['access_token']}"}
+    login = client.post(
+        "/api/auth/login",
+        data={
+            "username": "operator",
+            "password": "operator123",
+        },
+    ).json()
 
-    file_bytes = b"fake image bytes for testing plate photo"
-    files = {"file": ("camera_plate.jpg", io.BytesIO(file_bytes), "image/jpeg")}
-    upload_res = client.post("/api/fuel-entries/upload-photo", files=files, headers=headers)
-    assert upload_res.status_code == 200, upload_res.text
-    data = upload_res.json()
+    headers = {
+        "Authorization": f"Bearer {login['access_token']}"
+    }
+
+    pumps_res = client.get(
+        "/api/petrol-pumps/", headers=headers
+    )
+    assert pumps_res.status_code == 200
+
+    pump = pumps_res.json()[0]
+    gps_token = get_gps_token(client, headers, pump)
+
+    data = upload_test_photo(
+        client, headers, "PLATE", pump["id"], gps_token
+    )
+
+    assert "photo_id" in data
     assert "photo_url" in data
-    assert data["photo_url"].startswith("/uploads/")
+
+    assert data["photo_url"].startswith(
+        "/api/fuel-entries/photos/"
+    )
+
+    assert client.get(
+        data["photo_url"], headers=headers
+    ).status_code == 200
+
+    assert client.get(data["photo_url"]).status_code == 401
 
 
 def test_fuel_entry_and_mileage_calculation():
@@ -176,16 +370,25 @@ def test_fuel_entry_and_mileage_calculation():
     assert v_res.status_code == 200, v_res.text
     vehicles = v_res.json()
     assert len(vehicles) >= 1
-    vehicle = vehicles[0]
+    vehicle = next(
+        v for v in vehicles
+        if v["vehicle_number"] == "MH-12-AB-1001"
+    )
 
     p_res = client.get("/api/petrol-pumps/", headers=headers)
     assert p_res.status_code == 200, p_res.text
     pumps = p_res.json()
     assert len(pumps) >= 1
-    pump = pumps[0]
+    pump = next(
+        p for p in pumps
+        if p["name"] == "Bharat Petroleum - Highway Hub"
+    )
+
+    gps_token = get_gps_token(client, headers, pump)
 
     # Initial odometer is 45000. Let's record 45600 with 100 Litres + 3 attached photos + GPS
     entry_payload = {
+        "gps_verification_token": gps_token,
         "vehicle_id": vehicle["id"],
         "petrol_pump_id": pump["id"],
         "current_odometer": 45600.0,
@@ -194,11 +397,9 @@ def test_fuel_entry_and_mileage_calculation():
         "latitude": pump["latitude"] + 0.0001,  # ~11 meters away
         "longitude": pump["longitude"] + 0.0001,
         "accuracy_m": 10.0,
-        "photos": [
-            {"photo_type": "PLATE", "photo_url": "/uploads/test_plate.jpg"},
-            {"photo_type": "ODOMETER", "photo_url": "/uploads/test_odometer.jpg"},
-            {"photo_type": "RECEIPT", "photo_url": "/uploads/test_receipt.jpg"}
-        ]
+        "photos": upload_three_photos(
+            client, headers, pump["id"], gps_token
+        ),
     }
 
     create_res = client.post("/api/fuel-entries/", json=entry_payload, headers=headers)
@@ -223,11 +424,18 @@ def test_fuel_entry_and_mileage_calculation():
 
     # 3. Test Decreasing Odometer validation (must fail)
     invalid_payload = {
+        "gps_verification_token": gps_token,
         "vehicle_id": vehicle["id"],
         "petrol_pump_id": pump["id"],
         "current_odometer": 45500.0,  # Lower than 45600!
         "fuel_litres": 50.0,
-        "is_full_tank": True
+        "is_full_tank": True,
+        "latitude": pump["latitude"] + 0.0001,
+        "longitude": pump["longitude"] + 0.0001,
+        "accuracy_m": 10.0,
+        "photos": upload_three_photos(
+            client, headers, pump["id"], gps_token
+        ),
     }
     invalid_res = client.post("/api/fuel-entries/", json=invalid_payload, headers=headers)
     assert invalid_res.status_code == 400
