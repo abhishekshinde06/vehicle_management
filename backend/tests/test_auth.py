@@ -248,27 +248,73 @@ class TestCreateOperator:
 
     def test_operator_cannot_create_operator(self, client):
         """Operator calling create-operator → 403 Forbidden."""
-        payload = {"username": "another_driver", "password": "pass123"}
+        payload = {"username": "another_driver", "password": "password123", "full_name": "Another Driver"}
         res = client.post("/api/auth/create-operator", json=payload, headers=operator_headers(client))
         assert res.status_code == 403
 
     def test_unauthenticated_cannot_create_operator(self, client):
         """No token → 401."""
-        res = client.post("/api/auth/create-operator", json={"username": "x", "password": "pass123"})
+        res = client.post("/api/auth/create-operator", json={"username": "valid_user", "password": "password123", "full_name": "Valid User"})
         assert res.status_code == 401
 
     def test_create_operator_duplicate_username(self, client):
         """Duplicate username → 400 Bad Request."""
-        payload = {"username": "test_operator", "password": "somepass"}
+        payload = {"username": "test_operator", "password": "somepassword", "full_name": "Test Operator"}
         res = client.post("/api/auth/create-operator", json=payload, headers=owner_headers(client))
         assert res.status_code == 400
         assert "already taken" in res.json()["detail"]
 
     def test_create_operator_short_password(self, client):
-        """Password shorter than 6 chars → 422 Unprocessable Entity."""
-        payload = {"username": "shortpass_driver", "password": "abc"}
+        """Password shorter than 8 chars → 422 Unprocessable Entity."""
+        payload = {"username": "shortpass_driver", "password": "abc", "full_name": "Short Pass"}
         res = client.post("/api/auth/create-operator", json=payload, headers=owner_headers(client))
         assert res.status_code == 422
+
+    def test_create_operator_requires_full_name(self, client):
+        """Missing or blank full_name → 422 Unprocessable Entity."""
+        res_missing = client.post(
+            "/api/auth/create-operator",
+            json={"username": "noname_driver", "password": "driverpass99"},
+            headers=owner_headers(client),
+        )
+        assert res_missing.status_code == 422
+
+        res_blank = client.post(
+            "/api/auth/create-operator",
+            json={"username": "blankname_driver", "password": "driverpass99", "full_name": "   "},
+            headers=owner_headers(client),
+        )
+        assert res_blank.status_code == 422
+
+    def test_create_operator_rejects_whitespace_password_and_username(self, client):
+        """Whitespace-only or space-containing password/username → 422."""
+        res_ws_pass = client.post(
+            "/api/auth/create-operator",
+            json={"username": "ws_pass_driver", "password": "        ", "full_name": "WS Pass"},
+            headers=owner_headers(client),
+        )
+        assert res_ws_pass.status_code == 422
+
+        res_space_pass = client.post(
+            "/api/auth/create-operator",
+            json={"username": "sp_pass_driver", "password": "pass word1", "full_name": "Space Pass"},
+            headers=owner_headers(client),
+        )
+        assert res_space_pass.status_code == 422
+
+        res_ws_user = client.post(
+            "/api/auth/create-operator",
+            json={"username": "   ", "password": "driverpass99", "full_name": "WS User"},
+            headers=owner_headers(client),
+        )
+        assert res_ws_user.status_code == 422
+
+        res_space_user = client.post(
+            "/api/auth/create-operator",
+            json={"username": "bad user", "password": "driverpass99", "full_name": "Space User"},
+            headers=owner_headers(client),
+        )
+        assert res_space_user.status_code == 422
 
     def test_new_operator_can_login(self, client):
         """
@@ -278,7 +324,7 @@ class TestCreateOperator:
         # Create
         create_res = client.post(
             "/api/auth/create-operator",
-            json={"username": "loginable_driver", "password": "driverpass99"},
+            json={"username": "loginable_driver", "password": "driverpass99", "full_name": "Loginable Driver"},
             headers=owner_headers(client),
         )
         assert create_res.status_code == 201

@@ -9,7 +9,7 @@ NOTE: OwnerSignup has been intentionally removed.
 """
 
 from typing import Optional
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -25,14 +25,43 @@ class OperatorCreate(BaseModel):
     )
     password: str = Field(
         ..., min_length=8,
-        description="Password — minimum 6 characters",
+        description="Password — minimum 8 characters, no spaces",
         examples=["secure123"],
     )
-    full_name: Optional[str] = Field(
-        None, max_length=100,
-        description="Full name of the driver/operator",
+    full_name: str = Field(
+        ..., min_length=1, max_length=100,
+        description="Full name of the driver/operator (required)",
         examples=["Ramesh Kumar"],
     )
+
+    @field_validator("username")
+    @classmethod
+    def validate_username_trimmed(cls, value: str) -> str:
+        stripped = value.strip()
+        if len(stripped) < 3:
+            raise ValueError("Username must be at least 3 non-whitespace characters")
+        if any(ch.isspace() for ch in stripped):
+            raise ValueError("Username cannot contain spaces or whitespace")
+        return stripped
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_no_whitespace(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("Password cannot be empty or whitespace")
+        if any(ch.isspace() for ch in value):
+            raise ValueError("Password cannot contain spaces or whitespace")
+        if len(value) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        return value
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name_required(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Full name is required and cannot be blank")
+        return stripped
 
 
 # ---------------------------------------------------------------------------

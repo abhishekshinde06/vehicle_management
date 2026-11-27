@@ -31,14 +31,14 @@ from app.models import User, Vehicle, PetrolPump
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(dotenv_path=BASE_DIR / ".env")
 
-# Read initial credentials from environment variables
-OWNER_USERNAME = os.getenv("INITIAL_OWNER_USERNAME", "owner")
-OWNER_PASSWORD = os.getenv("INITIAL_OWNER_PASSWORD", "owner123")
-OWNER_FULL_NAME = os.getenv("INITIAL_OWNER_FULL_NAME", "Fleet Owner (Vikram)")
+# Read initial credentials from environment variables (no hardcoded passwords)
+OWNER_USERNAME = os.getenv("INITIAL_OWNER_USERNAME", "owner").strip() or "owner"
+OWNER_PASSWORD = os.getenv("INITIAL_OWNER_PASSWORD")
+OWNER_FULL_NAME = os.getenv("INITIAL_OWNER_FULL_NAME", "Fleet Owner")
 
-OPERATOR_USERNAME = os.getenv("INITIAL_OPERATOR_USERNAME", "operator")
-OPERATOR_PASSWORD = os.getenv("INITIAL_OPERATOR_PASSWORD", "operator123")
-OPERATOR_FULL_NAME = os.getenv("INITIAL_OPERATOR_FULL_NAME", "Tablet Operator (Ramesh)")
+OPERATOR_USERNAME = os.getenv("INITIAL_OPERATOR_USERNAME", "operator").strip() or "operator"
+OPERATOR_PASSWORD = os.getenv("INITIAL_OPERATOR_PASSWORD")
+OPERATOR_FULL_NAME = os.getenv("INITIAL_OPERATOR_FULL_NAME", "Tablet Operator")
 
 
 def seed_database():
@@ -63,6 +63,10 @@ def seed_database():
         print(f"\n[1/4] Seeding Owner account ('{OWNER_USERNAME}')...")
         owner = db.query(User).filter(User.username == OWNER_USERNAME).first()
         if not owner:
+            if not OWNER_PASSWORD or not OWNER_PASSWORD.strip():
+                raise ValueError(
+                    "INITIAL_OWNER_PASSWORD must be set in .env to seed the owner account."
+                )
             owner = User(
                 username=OWNER_USERNAME,
                 password_hash=get_password_hash(OWNER_PASSWORD),
@@ -81,6 +85,10 @@ def seed_database():
         print(f"\n[2/4] Seeding default Operator account ('{OPERATOR_USERNAME}')...")
         operator = db.query(User).filter(User.username == OPERATOR_USERNAME).first()
         if not operator:
+            if not OPERATOR_PASSWORD or not OPERATOR_PASSWORD.strip():
+                raise ValueError(
+                    "INITIAL_OPERATOR_PASSWORD must be set in .env to seed the operator account."
+                )
             operator = User(
                 username=OPERATOR_USERNAME,
                 password_hash=get_password_hash(OPERATOR_PASSWORD),
@@ -139,9 +147,8 @@ def seed_database():
         db.commit()
         print("\n" + "=" * 60)
         print("  Seeding completed successfully!")
-        print("  Login credentials:")
-        print("    Owner    — username: owner    | password: owner123")
-        print("    Operator — username: operator | password: operator123")
+        print(f"  Seeded accounts: '{OWNER_USERNAME}' (owner), '{OPERATOR_USERNAME}' (operator)")
+        print("  (Passwords are read from .env and are hidden for security.)")
         print("=" * 60)
 
     except Exception as exc:
