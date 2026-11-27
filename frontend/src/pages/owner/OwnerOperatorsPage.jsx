@@ -39,12 +39,17 @@ export default function OwnerOperatorsPage() {
     setFormSuccess('');
 
     const trimmedUsername = username.trim();
-    if (trimmedUsername.length < 3 || trimmedUsername.length > 50) {
-      setFormError('Username must be between 3 and 50 characters.');
+    const trimmedFullName = fullName.trim();
+    if (!trimmedUsername || trimmedUsername.length < 3 || trimmedUsername.length > 50 || /\s/.test(trimmedUsername)) {
+      setFormError('Username must be 3-50 characters and cannot contain spaces.');
       return;
     }
-    if (password.length < 8) {
-      setFormError('Password must be at least 8 characters long.');
+    if (!trimmedFullName) {
+      setFormError('Full name is required.');
+      return;
+    }
+    if (!password.trim() || /\s/.test(password) || password.length < 8) {
+      setFormError('Password must be at least 8 characters and cannot contain spaces.');
       return;
     }
 
@@ -53,7 +58,7 @@ export default function OwnerOperatorsPage() {
       const created = await createOperator({
         username: trimmedUsername,
         password,
-        full_name: fullName,
+        full_name: trimmedFullName,
       });
       setFormSuccess(`Operator account "${created.username}" created successfully.`);
       setUsername('');
@@ -105,11 +110,13 @@ export default function OwnerOperatorsPage() {
 
           <div>
             <label htmlFor="op_full_name" className="block text-sm font-semibold text-slate-700 mb-1">
-              Full Name (Optional)
+              Full Name *
             </label>
             <input
               id="op_full_name"
               type="text"
+              required
+              minLength={1}
               maxLength={100}
               value={fullName}
               onChange={(e) => setFullName(e.target.value)}

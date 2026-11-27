@@ -27,7 +27,7 @@ export default function LoginPage() {
     clearSessionMessage();
 
     const trimmedUsername = username.trim();
-    if (!trimmedUsername || !password) {
+    if (!trimmedUsername || !password.trim()) {
       setError('Please enter both username and password.');
       return;
     }

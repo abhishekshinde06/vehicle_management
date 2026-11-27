@@ -249,8 +249,28 @@ class TestCreateVehicle:
     def test_create_vehicle_unauthenticated(self, client):
         """Unauthenticated requests must return 401 Unauthorized."""
         payload = {
-            "vehicle_number": "MH-14-NOAUTH",
+            "vehicle_number": "MH-14-AB-0002",
             "initial_odometer": 0.0
         }
         res = client.post("/api/vehicles/", json=payload)
         assert res.status_code == 401
+
+    def test_create_vehicle_invalid_number_rejected(self, client, owner_headers):
+        """Invalid vehicle numbers (arbitrary text, numbers only, blanks) must return 422."""
+        for bad_number in ["   ", "12345", "hello world", "NOT-A-VEHICLE", "@@@"]:
+            res = client.post(
+                "/api/vehicles/",
+                json={"vehicle_number": bad_number, "initial_odometer": 0.0},
+                headers=owner_headers,
+            )
+            assert res.status_code == 422, f"Expected 422 for {bad_number!r}, got {res.status_code}"
+
+    def test_create_vehicle_normalizes_lowercase(self, client, owner_headers):
+        """Lowercase valid vehicle number is normalized to uppercase."""
+        res = client.post(
+            "/api/vehicles/",
+            json={"vehicle_number": "mh-12-cd-4567", "initial_odometer": 100.0},
+            headers=owner_headers,
+        )
+        assert res.status_code == 201
+        assert res.json()["vehicle_number"] == "MH-12-CD-4567"

@@ -130,7 +130,7 @@ def create_operator(
         username=username,
         password_hash=get_password_hash(operator_in.password),
         role="operator",
-        full_name=operator_in.full_name.strip() if operator_in.full_name else None,
+        full_name=operator_in.full_name,
         is_active=True,
     )
     db.add(operator)

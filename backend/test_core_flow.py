@@ -209,7 +209,8 @@ def test_public_signup_disabled_and_operator_provisioning():
     # 6. Security check: Operator CANNOT create another operator (must fail with 403 Forbidden)
     forbidden_res = client.post("/api/auth/create-operator", json={
         "username": "rogue_driver",
-        "password": "roguepassword123"
+        "password": "roguepassword123",
+        "full_name": "Rogue Driver",
     }, headers=op_headers)
     assert forbidden_res.status_code == 403
 

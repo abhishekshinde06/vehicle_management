@@ -3,6 +3,8 @@ import { createVehicle, getVehicles } from '../../api/vehicles';
 import AlertBanner from '../../components/AlertBanner';
 import { extractApiError, formatDateTime, formatNumber } from '../../utils/formatters';
 
+const VEHICLE_NUMBER_REGEX = /^([A-Z]{2}[-\s]?\d{1,2}[-\s]?[A-Z]{1,3}[-\s]?\d{1,4}|\d{2}[-\s]?BH[-\s]?\d{4}[-\s]?[A-Z]{1,2})$/;
+
 export default function OwnerVehiclesPage() {
   const [vehicles, setVehicles] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -38,11 +40,15 @@ export default function OwnerVehiclesPage() {
     setFormError('');
     setFormSuccess('');
 
-    const trimmedNumber = vehicleNumber.trim();
+    const trimmedNumber = vehicleNumber.trim().toUpperCase();
     const odoNum = Number(initialOdometer);
 
     if (!trimmedNumber) {
       setFormError('Vehicle number is required.');
+      return;
+    }
+    if (!VEHICLE_NUMBER_REGEX.test(trimmedNumber)) {
+      setFormError('Enter a valid vehicle number (e.g. MH-12-AB-1234).');
       return;
     }
     if (!Number.isFinite(odoNum) || odoNum < 0) {

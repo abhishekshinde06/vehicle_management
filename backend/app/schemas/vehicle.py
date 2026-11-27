@@ -1,6 +1,11 @@
+import re
 from typing import Optional
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+VEHICLE_NUMBER_REGEX = re.compile(
+    r"^([A-Z]{2}[-\s]?\d{1,2}[-\s]?[A-Z]{1,3}[-\s]?\d{1,4}|\d{2}[-\s]?BH[-\s]?\d{4}[-\s]?[A-Z]{1,2})$"
+)
 
 
 class VehicleBase(BaseModel):
@@ -15,10 +20,14 @@ class VehicleCreate(VehicleBase):
     @field_validator("vehicle_number")
     @classmethod
     def validate_vehicle_number(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
+        normalized = value.strip().upper()
+        if not normalized:
             raise ValueError("Vehicle number cannot be empty or blank")
-        return stripped
+        if not VEHICLE_NUMBER_REGEX.match(normalized):
+            raise ValueError(
+                "Invalid vehicle number format. Expected format like MH-12-AB-1234 or MH12AB1234."
+            )
+        return normalized
 
     @field_validator("model")
     @classmethod
