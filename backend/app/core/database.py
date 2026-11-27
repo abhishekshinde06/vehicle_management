@@ -17,26 +17,22 @@ from app.core.config import settings
 
 # SQLite requires 'check_same_thread: False' (threads differ per request).
 # PostgreSQL has no such limitation, so we pass an empty dict for it.
-_connect_args = {"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {}
+_is_sqlite = settings.DATABASE_URL.startswith("sqlite")
+_connect_args = {"check_same_thread": False} if _is_sqlite else {}
 
-# ---------------------------------------------------------------------------
-# Database Engine
-# ---------------------------------------------------------------------------
-# pool_pre_ping=True  — verify connections before handing them out (avoids
-#                       "server closed the connection" errors after idle time).
-# pool_size=10        — keep up to 10 persistent connections open.
-# max_overflow=20     — allow up to 20 extra connections under spike load.
-# pool_recycle=1800   — recycle connections after 30 min to dodge timeouts.
-# ---------------------------------------------------------------------------
-engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args=_connect_args,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
-    pool_recycle=1800,
-    echo=False,
-)
+_engine_kwargs = {
+    "connect_args": _connect_args,
+    "pool_pre_ping": True,
+    "echo": False,
+}
+if not _is_sqlite:
+    _engine_kwargs.update({
+        "pool_size": 10,
+        "max_overflow": 20,
+        "pool_recycle": 1800,
+    })
+
+engine = create_engine(settings.DATABASE_URL, **_engine_kwargs)
 
 # SessionLocal: Factory for creating new database sessions per HTTP request
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

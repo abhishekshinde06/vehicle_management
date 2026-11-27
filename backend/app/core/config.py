@@ -33,15 +33,23 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = os.getenv(
-        "DATABASE_URL"
+        "DATABASE_URL", "sqlite:///./fuel_tracker.db"
     )
 
-    # Static photo uploads
+    # Photo uploads & validation
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "./uploads")
+    MAX_IMAGE_SIZE_BYTES: int = int(os.getenv("MAX_IMAGE_SIZE_BYTES", str(5 * 1024 * 1024)))
 
     # Geofencing configurations
     DEFAULT_GEOFENCE_RADIUS_METERS: float = float(os.getenv("DEFAULT_GEOFENCE_RADIUS_METERS", "100.0"))
     MAX_ALLOWED_GPS_ACCURACY_METERS: float = float(os.getenv("MAX_ALLOWED_GPS_ACCURACY_METERS", "50.0"))
+
+    # AWS S3 Storage
+    USE_S3: bool = os.getenv("USE_S3", "false").lower() in ("true", "1", "yes")
+    AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "")
+    AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+    AWS_REGION: str = os.getenv("AWS_REGION", "ap-southeast-2")
+    S3_BUCKET_NAME: str = os.getenv("S3_BUCKET_NAME", "transporter-fleet-fuel-bucket")
 
     model_config = SettingsConfigDict(
         env_file=str(ENV_PATH),
