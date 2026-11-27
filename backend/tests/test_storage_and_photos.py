@@ -51,7 +51,29 @@ def make_image_bytes(fmt: str = "JPEG", size=(32, 32), color=(20, 120, 220)) -> 
     img = Image.new("RGB", size, color=color)
     img.save(buf, format=fmt)
     return buf.getvalue()
+def get_gps_token(client, headers):
+    response = client.post(
+        "/api/fuel-entries/verify-location",
+        json={
+            "petrol_pump_id": "pump-photo-1",
+            "latitude": 18.5204,
+            "longitude": 73.8567,
+            "accuracy_m": 10.0,
+        },
+        headers=headers,
+    )
 
+    assert response.status_code == 200, response.text
+
+    return response.json()["gps_verification_token"]
+
+
+def make_upload_data(client, headers, photo_type):
+    return {
+        "photo_type": photo_type,
+        "petrol_pump_id": "pump-photo-1",
+        "gps_verification_token": get_gps_token(client, headers),
+    }
 
 @pytest.fixture
 def isolated_env():
@@ -232,7 +254,9 @@ class TestPhotoUploadAndRetrievalAPI:
         client = isolated_env["client"]
         res = client.post(
             "/api/fuel-entries/upload-photo",
-            data={"photo_type": "PLATE"},
+            data=make_upload_data(
+            client, isolated_env["op1_headers"], "PLATE"
+            ),
             files={"file": ("plate.jpg", io.BytesIO(make_image_bytes("JPEG")), "image/jpeg")},
             headers=isolated_env["op1_headers"],
         )
@@ -249,7 +273,7 @@ class TestPhotoUploadAndRetrievalAPI:
         assert (
             client.post(
                 "/api/fuel-entries/upload-photo",
-                data={"photo_type": "PLATE"},
+                data=make_upload_data(client, headers, "PLATE"),
                 files={"file": ("plate.jpg", io.BytesIO(make_image_bytes("JPEG")), "image/jpeg")},
             ).status_code
             == 401
@@ -259,7 +283,7 @@ class TestPhotoUploadAndRetrievalAPI:
         assert (
             client.post(
                 "/api/fuel-entries/upload-photo",
-                data={"photo_type": "SELFIE"},
+                data=make_upload_data(client, headers, "SELFIE"),
                 files={"file": ("plate.jpg", io.BytesIO(make_image_bytes("JPEG")), "image/jpeg")},
                 headers=headers,
             ).status_code
@@ -270,7 +294,7 @@ class TestPhotoUploadAndRetrievalAPI:
         assert (
             client.post(
                 "/api/fuel-entries/upload-photo",
-                data={"photo_type": "PLATE"},
+                data=make_upload_data(client, headers, "PLATE"),
                 files={"file": ("empty.jpg", io.BytesIO(b""), "image/jpeg")},
                 headers=headers,
             ).status_code
@@ -281,7 +305,7 @@ class TestPhotoUploadAndRetrievalAPI:
         assert (
             client.post(
                 "/api/fuel-entries/upload-photo",
-                data={"photo_type": "PLATE"},
+                data=make_upload_data(client, headers, "PLATE"),
                 files={"file": ("fake.jpg", io.BytesIO(b"not really an image"), "image/jpeg")},
                 headers=headers,
             ).status_code
@@ -289,11 +313,15 @@ class TestPhotoUploadAndRetrievalAPI:
         )
 
         # Oversized > 5 MB -> 413
-        oversized = io.BytesIO(b"\xff\xd8\xff\xe0" + b"0" * (5 * 1024 * 1024))
+                # Oversized > 5 MB -> 413
+        oversized = io.BytesIO(
+            b"\xff\xd8\xff\xe0" + b"0" * (5 * 1024 * 1024)
+        )
+
         assert (
             client.post(
                 "/api/fuel-entries/upload-photo",
-                data={"photo_type": "PLATE"},
+                data=make_upload_data(client, headers, "PLATE"),
                 files={"file": ("big.jpg", oversized, "image/jpeg")},
                 headers=headers,
             ).status_code
@@ -306,7 +334,9 @@ class TestPhotoUploadAndRetrievalAPI:
 
         up_res = client.post(
             "/api/fuel-entries/upload-photo",
-            data={"photo_type": "PLATE"},
+            data=make_upload_data(
+                client, isolated_env["op1_headers"], "PLATE"
+            ),
             files={"file": ("plate.png", io.BytesIO(img_bytes), "image/png")},
             headers=isolated_env["op1_headers"],
         )
@@ -337,7 +367,7 @@ class TestFuelEntryPhotoValidationAndConcurrency:
         for ptype in ("PLATE", "ODOMETER", "RECEIPT"):
             res = client.post(
                 "/api/fuel-entries/upload-photo",
-                data={"photo_type": ptype},
+                data=make_upload_data(client, headers, ptype),
                 files={"file": (f"{ptype.lower()}.jpg", io.BytesIO(make_image_bytes("JPEG")), "image/jpeg")},
                 headers=headers,
             )
@@ -356,6 +386,7 @@ class TestFuelEntryPhotoValidationAndConcurrency:
         base_payload = {
             "vehicle_id": "v-photo-1",
             "petrol_pump_id": "pump-photo-1",
+            "gps_verification_token": get_gps_token(client, op1_headers),
             "current_odometer": 10500.0,
             "fuel_litres": 50.0,
             "is_full_tank": True,
@@ -461,13 +492,14 @@ class TestFuelEntryPhotoValidationAndConcurrency:
         client = isolated_env["client"]
         op1_headers = isolated_env["op1_headers"]
         op1_photos = self._upload_three(client, op1_headers)
-
+        gps_token = get_gps_token(client, op1_headers)
         def submit_with_odo(odo: float):
             return client.post(
                 "/api/fuel-entries/",
                 json={
                     "vehicle_id": "v-photo-1",
                     "petrol_pump_id": "pump-photo-1",
+                    "gps_verification_token": gps_token,
                     "current_odometer": odo,
                     "fuel_litres": 40.0,
                     "is_full_tank": True,

@@ -1,24 +1,19 @@
-
 """
 Fuel Entry GPS Integration Tests
---------------------------------
-Tests authentication, GPS validation, and fuel entry creation
-using an isolated in-memory SQLite database.
 """
 
 import os
 import tempfile
 import uuid
 
-# Configure a temporary database before importing the application.
 _test_db_dir = tempfile.TemporaryDirectory()
-os.environ["DATABASE_URL"] = (
-    f"sqlite:///{_test_db_dir.name}/fuel_test.db"
+os.environ.setdefault(
+    "DATABASE_URL",
+    f"sqlite:///{_test_db_dir.name}/fuel_test.db",
 )
 
 import pytest
 from fastapi.testclient import TestClient
-from jose import jwt
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -27,19 +22,28 @@ import app.models
 from app.main import app as fastapi_app
 from app.core.config import settings
 from app.core.database import Base, get_db
-from app.models import User, Vehicle, PetrolPump, FuelEntry, UploadedPhoto
+from app.core.security import create_access_token
+from app.models import (
+    User,
+    Vehicle,
+    PetrolPump,
+    FuelEntry,
+    UploadedPhoto,
+)
 
 
-def seed_three_photos(TestingSession, uploader_id: str):
-    """Creates three unused UploadedPhoto records and returns the API payload list."""
+def seed_three_photos(TestingSession, uploader_id, pump_id):
     photos = []
+
     with TestingSession() as db:
         for ptype in ("PLATE", "ODOMETER", "RECEIPT"):
             pid = str(uuid.uuid4())
+
             db.add(
                 UploadedPhoto(
                     id=pid,
                     uploader_id=uploader_id,
+                    petrol_pump_id=pump_id,
                     photo_type=ptype,
                     storage_type="local",
                     storage_reference=f"{pid}.jpg",
@@ -48,20 +52,40 @@ def seed_three_photos(TestingSession, uploader_id: str):
                     is_used=False,
                 )
             )
+
             photos.append(
                 {
                     "photo_type": ptype,
-                    "photo_url": f"{settings.API_PREFIX}/fuel-entries/photos/{pid}",
+                    "photo_url": (
+                        f"{settings.API_PREFIX}/fuel-entries/photos/{pid}"
+                    ),
                 }
             )
+
         db.commit()
+
     return photos
+
+
+def get_gps_token(client, headers, pump_id):
+    response = client.post(
+        "/api/fuel-entries/verify-location",
+        headers=headers,
+        json={
+            "petrol_pump_id": pump_id,
+            "latitude": 23.2599,
+            "longitude": 77.4126,
+            "accuracy_m": 10,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+
+    return response.json()["gps_verification_token"]
 
 
 @pytest.fixture
 def test_client():
-    """Create an isolated in-memory database for each test."""
-
     test_engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -95,7 +119,6 @@ def test_client():
 
 
 def test_fuel_entry_requires_login(test_client):
-    """Requests without authentication must be rejected."""
     client, _ = test_client
 
     response = client.post(
@@ -107,7 +130,6 @@ def test_fuel_entry_requires_login(test_client):
 
 
 def test_fuel_entry_without_gps(test_client):
-    """Unauthenticated requests must fail even without GPS."""
     client, _ = test_client
 
     response = client.post(
@@ -124,11 +146,9 @@ def test_fuel_entry_without_gps(test_client):
 
 
 def test_fuel_entry_gps_validation(test_client):
-    """Test GPS validation with an authenticated operator."""
-
     client, TestingSession = test_client
 
-    # 1. Create test operator, vehicle, and petrol pump.
+    # Create test operator, vehicle and petrol pump.
     with TestingSession() as db:
         operator = User(
             username="gps_test_operator",
@@ -158,11 +178,9 @@ def test_fuel_entry_gps_validation(test_client):
         vehicle_id = vehicle.id
         pump_id = pump.id
 
-    # 2. Generate a test JWT token.
-    token = jwt.encode(
-        {"sub": operator_id},
-        settings.SECRET_KEY,
-        algorithm=settings.ALGORITHM,
+    token = create_access_token(
+        subject=operator_id,
+        role="operator",
     )
 
     headers = {
@@ -170,23 +188,29 @@ def test_fuel_entry_gps_validation(test_client):
     }
 
     payload = {
-    "vehicle_id": vehicle_id,
-    "petrol_pump_id": pump_id,
-    "current_odometer": 1100,
-    "fuel_litres": 20,
-    "is_full_tank": True,
-    "photos": seed_three_photos(TestingSession, operator_id),
+        "vehicle_id": vehicle_id,
+        "petrol_pump_id": pump_id,
+        "gps_verification_token": get_gps_token(
+            client, headers, pump_id
+        ),
+        "current_odometer": 1100,
+        "fuel_litres": 20,
+        "is_full_tank": True,
+        "photos": seed_three_photos(
+            TestingSession, operator_id, pump_id
+        ),
     }
 
-    # 3. Missing GPS -> 422
+    # Missing GPS -> 422
     response = client.post(
         "/api/fuel-entries/",
         json=payload,
         headers=headers,
     )
+
     assert response.status_code == 422, response.text
 
-    # 4. Outside authorized pump -> 403
+    # Outside authorized petrol pump -> 403
     response = client.post(
         "/api/fuel-entries/",
         json={
@@ -197,9 +221,10 @@ def test_fuel_entry_gps_validation(test_client):
         },
         headers=headers,
     )
+
     assert response.status_code == 403, response.text
 
-    # 5. Inaccurate GPS -> 403
+    # Inaccurate GPS -> 403
     response = client.post(
         "/api/fuel-entries/",
         json={
@@ -210,13 +235,14 @@ def test_fuel_entry_gps_validation(test_client):
         },
         headers=headers,
     )
+
     assert response.status_code == 403, response.text
 
-    # Rejected requests must not create fuel records.
+    # Rejected requests must not create records.
     with TestingSession() as db:
         assert db.query(FuelEntry).count() == 0
 
-    # 6. Valid GPS -> 201
+    # Valid GPS -> 201
     response = client.post(
         "/api/fuel-entries/",
         json={
@@ -231,12 +257,13 @@ def test_fuel_entry_gps_validation(test_client):
     assert response.status_code == 201, response.text
 
     data = response.json()
+
     assert data["is_location_verified"] is True
     assert data["distance_from_pump_m"] == 0.0
 
-    # Confirm the entry was actually saved.
     with TestingSession() as db:
         assert db.query(FuelEntry).count() == 1
+
 
 def test_verify_location_requires_login(test_client):
     client, _ = test_client
@@ -289,15 +316,16 @@ def test_verify_location(
         operator_id = operator.id
         pump_id = pump.id
 
-    token = jwt.encode(
-        {"sub": operator_id},
-        settings.SECRET_KEY,
-        algorithm=settings.ALGORITHM,
+    token = create_access_token(
+        subject=operator_id,
+        role="operator",
     )
 
     response = client.post(
         "/api/fuel-entries/verify-location",
-        headers={"Authorization": f"Bearer {token}"},
+        headers={
+            "Authorization": f"Bearer {token}"
+        },
         json={
             "petrol_pump_id": pump_id,
             "latitude": latitude,
@@ -310,15 +338,16 @@ def test_verify_location(
 
     if expected_status == 200:
         assert response.json()["is_location_verified"] is True
+        assert response.json()["gps_verification_token"]
 
-    # Location verification must not create a fuel entry.
+    # GPS verification must not create a fuel entry.
     with TestingSession() as db:
         assert db.query(FuelEntry).count() == 0
+
 
 def test_full_to_full_mileage(test_client):
     client, TestingSession = test_client
 
-    # Create test data.
     with TestingSession() as db:
         operator = User(
             username="mileage_operator",
@@ -348,18 +377,21 @@ def test_full_to_full_mileage(test_client):
         vehicle_id = vehicle.id
         pump_id = pump.id
 
-    token = jwt.encode(
-        {"sub": operator_id},
-        settings.SECRET_KEY,
-        algorithm=settings.ALGORITHM,
+    token = create_access_token(
+        subject=operator_id,
+        role="operator",
     )
 
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
 
-    # Common fuel entry data.
     payload = {
         "vehicle_id": vehicle_id,
         "petrol_pump_id": pump_id,
+        "gps_verification_token": get_gps_token(
+            client, headers, pump_id
+        ),
         "latitude": 23.2599,
         "longitude": 77.4126,
         "accuracy_m": 10,
@@ -375,7 +407,6 @@ def test_full_to_full_mileage(test_client):
     ]
 
     for odometer, litres, full_tank, expected in scenarios:
-
         response = client.post(
             "/api/fuel-entries/",
             headers=headers,
@@ -384,18 +415,19 @@ def test_full_to_full_mileage(test_client):
                 "current_odometer": odometer,
                 "fuel_litres": litres,
                 "is_full_tank": full_tank,
-                "photos": seed_three_photos(TestingSession, operator_id),
+                "photos": seed_three_photos(
+                    TestingSession, operator_id, pump_id
+                ),
             },
         )
 
         assert response.status_code == 201, response.text
-
         assert response.json()["mileage_kmpl"] == expected
 
     with TestingSession() as db:
-        assert db.query(FuelEntry).count() == 5      
+        assert db.query(FuelEntry).count() == 5
 
-        # Try submitting the last fuel entry again.
+    # Duplicate odometer submission must fail.
     response = client.post(
         "/api/fuel-entries/",
         headers=headers,
@@ -404,14 +436,17 @@ def test_full_to_full_mileage(test_client):
             "current_odometer": 46200,
             "fuel_litres": 100,
             "is_full_tank": True,
-            "photos": seed_three_photos(TestingSession, operator_id),
+            "photos": seed_three_photos(
+                TestingSession, operator_id, pump_id
+            ),
         },
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 400, response.text
 
     with TestingSession() as db:
-        assert db.query(FuelEntry).count() == 5      
+        assert db.query(FuelEntry).count() == 5
+
 
 def test_owner_review_and_mileage(test_client):
     client, TestingSession = test_client
@@ -453,20 +488,25 @@ def test_owner_review_and_mileage(test_client):
         vehicle_id = vehicle.id
         pump_id = pump.id
 
-    def get_headers(user_id):
-        token = jwt.encode(
-            {"sub": user_id},
-            settings.SECRET_KEY,
-            algorithm=settings.ALGORITHM,
+    def get_headers(user_id, role):
+        token = create_access_token(
+            subject=user_id,
+            role=role,
         )
-        return {"Authorization": f"Bearer {token}"}
 
-    owner_headers = get_headers(owner_id)
-    operator_headers = get_headers(operator_id)
+        return {
+            "Authorization": f"Bearer {token}"
+        }
+
+    owner_headers = get_headers(owner_id, "owner")
+    operator_headers = get_headers(operator_id, "operator")
 
     payload = {
         "vehicle_id": vehicle_id,
         "petrol_pump_id": pump_id,
+        "gps_verification_token": get_gps_token(
+            client, operator_headers, pump_id
+        ),
         "latitude": 23.2599,
         "longitude": 77.4126,
         "accuracy_m": 10,
@@ -474,7 +514,7 @@ def test_owner_review_and_mileage(test_client):
 
     entry_ids = []
 
-    # Create three fueling records.
+    # Create three fuel entries.
     for odometer, litres, full_tank in [
         (45000, 50, True),
         (45200, 20, False),
@@ -488,34 +528,41 @@ def test_owner_review_and_mileage(test_client):
                 "current_odometer": odometer,
                 "fuel_litres": litres,
                 "is_full_tank": full_tank,
-                "photos": seed_three_photos(TestingSession, operator_id),
+                "photos": seed_three_photos(
+                    TestingSession, operator_id, pump_id
+                ),
             },
         )
 
         assert response.status_code == 201, response.text
+
         entry_ids.append(response.json()["id"])
 
     assert response.json()["mileage_kmpl"] == 6.0
 
-    review_url = f"/api/fuel-entries/{entry_ids[1]}/verify"
+    review_url = (
+        f"/api/fuel-entries/{entry_ids[1]}/verify"
+    )
 
-    # Operator cannot approve.
+    # Operator cannot approve fuel entries.
     response = client.patch(
         review_url,
         headers=operator_headers,
         json={"status": "APPROVED"},
     )
+
     assert response.status_code == 403
 
-    # Rejection without reason is invalid.
+    # Rejection without reason must fail.
     response = client.patch(
         review_url,
         headers=owner_headers,
         json={"status": "REJECTED"},
     )
+
     assert response.status_code == 400
 
-    # Owner rejects an incorrect partial refill.
+    # Owner rejects incorrect partial refill.
     response = client.patch(
         review_url,
         headers=owner_headers,
@@ -534,9 +581,10 @@ def test_owner_review_and_mileage(test_client):
         headers=owner_headers,
         json={"status": "APPROVED"},
     )
+
     assert response.status_code == 409
 
-    # Check recalculated mileage.
+    # Verify recalculated mileage.
     response = client.get(
         f"/api/fuel-entries/{entry_ids[2]}",
         headers=owner_headers,
@@ -553,4 +601,4 @@ def test_owner_review_and_mileage(test_client):
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "APPROVED"        
+    assert response.json()["status"] == "APPROVED"

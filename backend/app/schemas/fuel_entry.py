@@ -95,6 +95,7 @@ class EntryPhotoResponse(EntryPhotoBase):
 class FuelEntryCreate(BaseModel):
     vehicle_id: str
     petrol_pump_id: str
+    gps_verification_token: str = Field(..., min_length=1)
     current_odometer: float = Field(
         ..., gt=0, allow_inf_nan=False, description="Current odometer reading"
     )
@@ -119,6 +120,14 @@ class FuelEntryCreate(BaseModel):
     accuracy_m: float = Field(..., ge=0, allow_inf_nan=False)
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("vehicle_id", "petrol_pump_id", "gps_verification_token")
+    @classmethod
+    def validate_required_non_blank_strings(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Field cannot be empty or blank")
+        return stripped
 
     @field_validator(
         "current_odometer",
@@ -213,6 +222,13 @@ class FuelEntryResponse(BaseModel):
     accuracy_m: Optional[float] = None
     distance_from_pump_m: Optional[float] = None
     is_location_verified: bool
+
+    ocr_odometer_status: Optional[str] = None
+    ocr_odometer_value: Optional[float] = None
+    ocr_fuel_status: Optional[str] = None
+    ocr_fuel_value: Optional[float] = None
+    needs_manual_review: bool = False
+    ocr_notes: Optional[str] = None
 
     status: str
     rejection_reason: Optional[str] = None

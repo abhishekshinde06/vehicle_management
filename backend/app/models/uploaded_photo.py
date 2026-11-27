@@ -22,6 +22,12 @@ class UploadedPhoto(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     uploader_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    petrol_pump_id = Column(
+    String,
+    ForeignKey("petrol_pumps.id"),
+    nullable=True,
+    index=True,
+    )
     photo_type = Column(String, nullable=False)  # "PLATE", "ODOMETER", "RECEIPT"
     storage_type = Column(String, nullable=False, default="local")  # "local" or "s3"
     storage_reference = Column(String, nullable=False, unique=True)
@@ -43,3 +49,4 @@ class UploadedPhoto(Base):
 
     uploader = relationship("User")
     fuel_entry = relationship("FuelEntry")
+    petrol_pump = relationship("PetrolPump")

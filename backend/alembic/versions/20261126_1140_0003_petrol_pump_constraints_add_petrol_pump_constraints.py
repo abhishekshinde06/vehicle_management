@@ -1,6 +1,6 @@
 """Add petrol pump uniqueness constraints."""
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -11,37 +11,38 @@ depends_on = None
 
 
 def upgrade():
-    connection = op.get_bind()
+    if not context.is_offline_mode():
+        connection = op.get_bind()
 
-    # Check existing duplicate names
-    duplicate_names = connection.execute(
-        sa.text("""
-            SELECT LOWER(TRIM(name)), COUNT(*)
-            FROM petrol_pumps
-            GROUP BY LOWER(TRIM(name))
-            HAVING COUNT(*) > 1
-        """)
-    ).fetchall()
+        # Check existing duplicate names
+        duplicate_names = connection.execute(
+            sa.text("""
+                SELECT LOWER(TRIM(name)), COUNT(*)
+                FROM petrol_pumps
+                GROUP BY LOWER(TRIM(name))
+                HAVING COUNT(*) > 1
+            """)
+        ).fetchall()
 
-    if duplicate_names:
-        raise RuntimeError(
-            f"Duplicate petrol pump names found: {duplicate_names}"
-        )
+        if duplicate_names:
+            raise RuntimeError(
+                f"Duplicate petrol pump names found: {duplicate_names}"
+            )
 
-    # Check existing duplicate GPS coordinates
-    duplicate_locations = connection.execute(
-        sa.text("""
-            SELECT latitude, longitude, COUNT(*)
-            FROM petrol_pumps
-            GROUP BY latitude, longitude
-            HAVING COUNT(*) > 1
-        """)
-    ).fetchall()
+        # Check existing duplicate GPS coordinates
+        duplicate_locations = connection.execute(
+            sa.text("""
+                SELECT latitude, longitude, COUNT(*)
+                FROM petrol_pumps
+                GROUP BY latitude, longitude
+                HAVING COUNT(*) > 1
+            """)
+        ).fetchall()
 
-    if duplicate_locations:
-        raise RuntimeError(
-            f"Duplicate pump locations found: {duplicate_locations}"
-        )
+        if duplicate_locations:
+            raise RuntimeError(
+                f"Duplicate pump locations found: {duplicate_locations}"
+            )
 
     # SQLite and PostgreSQL compatible constraint
     with op.batch_alter_table("petrol_pumps") as batch_op:

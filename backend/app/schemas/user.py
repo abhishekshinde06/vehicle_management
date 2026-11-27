@@ -9,7 +9,7 @@ NOTE: OwnerSignup has been intentionally removed.
 """
 
 from typing import Optional
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +25,7 @@ class OperatorCreate(BaseModel):
     )
     password: str = Field(
         ..., min_length=8,
-        description="Password — minimum 6 characters",
+        description="Password — minimum 8 characters",
         examples=["secure123"],
     )
     full_name: Optional[str] = Field(
@@ -33,6 +33,14 @@ class OperatorCreate(BaseModel):
         description="Full name of the driver/operator",
         examples=["Ramesh Kumar"],
     )
+
+    @field_validator("username")
+    @classmethod
+    def validate_username_trimmed(cls, value: str) -> str:
+        stripped = value.strip()
+        if len(stripped) < 3:
+            raise ValueError("Username must be at least 3 non-whitespace characters")
+        return stripped
 
 
 # ---------------------------------------------------------------------------

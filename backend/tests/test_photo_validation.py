@@ -8,6 +8,7 @@ def make_payload(photos):
     return {
         "vehicle_id": "vehicle-1",
         "petrol_pump_id": "pump-1",
+        "gps_verification_token": "test-gps-token",
         "current_odometer": 1100,
         "fuel_litres": 20,
         "latitude": 23.2599,
@@ -56,7 +57,7 @@ def test_empty_photo_url():
 
 
 def test_duplicate_photo_urls():
-    """Duplicate photo URLs across different photo types must be rejected."""
+    """Duplicate photo URLs must be rejected."""
     photos = [
         {"photo_type": "PLATE", "photo_url": "same_image.jpg"},
         {"photo_type": "ODOMETER", "photo_url": "same_image.jpg"},
@@ -65,7 +66,10 @@ def test_duplicate_photo_urls():
 
     with pytest.raises(ValidationError) as exc_info:
         FuelEntryCreate(**make_payload(photos))
-    assert "Duplicate photo URLs are not allowed" in str(exc_info.value)
+
+    assert "Duplicate photo URLs are not allowed" in str(
+        exc_info.value
+    )
 
 
 def test_whitespace_photo_url():
@@ -81,36 +85,53 @@ def test_whitespace_photo_url():
 
 
 def test_unexpected_request_fields():
-    """Unexpected request fields must be rejected by Pydantic extra='forbid'."""
+    """Unexpected request fields must be rejected."""
     photos = [
         {"photo_type": "PLATE", "photo_url": "plate.jpg"},
         {"photo_type": "ODOMETER", "photo_url": "odometer.jpg"},
         {"photo_type": "RECEIPT", "photo_url": "receipt.jpg"},
     ]
+
     payload = make_payload(photos)
     payload["unexpected_field"] = "malicious_data"
 
     with pytest.raises(ValidationError) as exc_info:
         FuelEntryCreate(**payload)
-    assert "Extra inputs are not permitted" in str(exc_info.value)
+
+    assert "Extra inputs are not permitted" in str(
+        exc_info.value
+    )
 
 
 def test_legacy_direct_fields_rejected():
-    """Legacy direct photo URL fields in request body must be rejected as extra fields."""
+    """Legacy direct photo URL fields must be rejected."""
     photos = [
         {"photo_type": "PLATE", "photo_url": "plate.jpg"},
         {"photo_type": "ODOMETER", "photo_url": "odometer.jpg"},
         {"photo_type": "RECEIPT", "photo_url": "receipt.jpg"},
     ]
+
     payload = make_payload(photos)
     payload["photo_plate_url"] = "legacy_plate.jpg"
 
     with pytest.raises(ValidationError) as exc_info:
         FuelEntryCreate(**payload)
-    assert "Extra inputs are not permitted" in str(exc_info.value)
+
+    assert "Extra inputs are not permitted" in str(
+        exc_info.value
+    )
 
 
-@pytest.mark.parametrize("field_name", ["current_odometer", "fuel_litres", "accuracy_m", "latitude", "longitude"])
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "current_odometer",
+        "fuel_litres",
+        "accuracy_m",
+        "latitude",
+        "longitude",
+    ],
+)
 def test_nan_numeric_values_rejected(field_name):
     """NaN numeric values must be rejected."""
     photos = [
@@ -118,6 +139,7 @@ def test_nan_numeric_values_rejected(field_name):
         {"photo_type": "ODOMETER", "photo_url": "odometer.jpg"},
         {"photo_type": "RECEIPT", "photo_url": "receipt.jpg"},
     ]
+
     payload = make_payload(photos)
     payload[field_name] = float("nan")
 
@@ -125,7 +147,16 @@ def test_nan_numeric_values_rejected(field_name):
         FuelEntryCreate(**payload)
 
 
-@pytest.mark.parametrize("field_name", ["current_odometer", "fuel_litres", "accuracy_m", "latitude", "longitude"])
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "current_odometer",
+        "fuel_litres",
+        "accuracy_m",
+        "latitude",
+        "longitude",
+    ],
+)
 def test_infinite_numeric_values_rejected(field_name):
     """Infinite numeric values must be rejected."""
     photos = [
@@ -133,8 +164,34 @@ def test_infinite_numeric_values_rejected(field_name):
         {"photo_type": "ODOMETER", "photo_url": "odometer.jpg"},
         {"photo_type": "RECEIPT", "photo_url": "receipt.jpg"},
     ]
+
     payload = make_payload(photos)
     payload[field_name] = float("inf")
 
     with pytest.raises(ValidationError):
         FuelEntryCreate(**payload)
+
+
+@pytest.mark.parametrize("token", [None, ""])
+def test_invalid_gps_token_field(token):
+    """Missing or empty GPS tokens must be rejected."""
+    photos = [
+        {"photo_type": "PLATE", "photo_url": "plate.jpg"},
+        {"photo_type": "ODOMETER", "photo_url": "odometer.jpg"},
+        {"photo_type": "RECEIPT", "photo_url": "receipt.jpg"},
+    ]
+
+    payload = make_payload(photos)
+
+    if token is None:
+        payload.pop("gps_verification_token")
+    else:
+        payload["gps_verification_token"] = token
+
+    with pytest.raises(ValidationError) as exc_info:
+        FuelEntryCreate(**payload)
+
+    assert any(
+        error["loc"] == ("gps_verification_token",)
+        for error in exc_info.value.errors()
+    )

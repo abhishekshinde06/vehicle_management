@@ -23,6 +23,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.geofence import calculate_distance_m, verify_geofence
 from app.core.mileage import calculate_mileage
+from app.core.ocr import verify_image_reading
 from app.models import FuelEntry, Vehicle, PetrolPump, AuditLog, User, EntryPhoto, UploadedPhoto
 from app.routes.deps import get_current_user, get_current_operator, get_current_owner
 from app.schemas.fuel_entry import (
@@ -43,6 +44,10 @@ from app.services.storage import (
     read_image,
     save_image,
     validate_image_bytes,
+)
+from app.core.security import (
+    create_gps_verification_token,
+    validate_gps_verification_token,
 )
 
 router = APIRouter()
@@ -92,6 +97,47 @@ def _extract_uploaded_photo_id(photo_in: EntryPhotoCreate) -> str:
     )
 
 
+def _evaluate_entry_ocr(
+    photos_by_type: dict,
+    current_odometer: float,
+    fuel_litres: float,
+) -> dict:
+    """
+    Runs local Tesseract OCR on ODOMETER and RECEIPT photos and flags
+    mismatches or unreadable/ambiguous images for owner review.
+    """
+    def _check_one(photo: UploadedPhoto, manual_value: float, label: str) -> dict:
+        try:
+            image_bytes = read_image(photo.storage_reference, photo.storage_type)
+        except (PhotoNotFoundError, StorageError):
+            return {
+                "status": "UNREADABLE",
+                "matched": False,
+                "extracted_value": None,
+                "reason": f"{label} image unavailable for OCR",
+            }
+        return verify_image_reading(
+            image_bytes=image_bytes,
+            manual_value=manual_value,
+            field_label=label,
+        )
+
+    odo_result = _check_one(photos_by_type["ODOMETER"], current_odometer, "Odometer")
+    fuel_result = _check_one(photos_by_type["RECEIPT"], fuel_litres, "Fuel quantity")
+
+    reasons = [r for r in (odo_result.get("reason"), fuel_result.get("reason")) if r]
+    needs_manual_review = not (odo_result["matched"] and fuel_result["matched"])
+
+    return {
+        "ocr_odometer_status": odo_result["status"],
+        "ocr_odometer_value": odo_result["extracted_value"],
+        "ocr_fuel_status": fuel_result["status"],
+        "ocr_fuel_value": fuel_result["extracted_value"],
+        "needs_manual_review": needs_manual_review,
+        "ocr_notes": "; ".join(reasons) if reasons else None,
+    }
+
+
 @router.post(
     "/upload-photo",
     response_model=UploadedPhotoResponse,
@@ -100,6 +146,8 @@ def _extract_uploaded_photo_id(photo_in: EntryPhotoCreate) -> str:
 async def upload_photo(
     photo_type: str = Form(..., description="Photo type: PLATE, ODOMETER, or RECEIPT"),
     file: UploadFile = File(..., description="Image file to upload (JPEG, PNG, WebP; max 5 MB)"),
+    petrol_pump_id: str = Form(...),
+    gps_verification_token: str = Form(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_operator),
 ):
@@ -108,6 +156,28 @@ async def upload_photo(
     unsupported files), stores the image in local disk or configured S3 storage, and
     tracks the upload in `uploaded_photos` bound to the authenticated uploader.
     """
+        # Validate GPS verification token
+    if not validate_gps_verification_token(
+        token=gps_verification_token,
+        user_id=current_user.id,
+        pump_id=petrol_pump_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid or expired GPS verification. Please verify your location again."
+        )
+
+    # Verify petrol pump is still active
+    pump = db.query(PetrolPump).filter(
+        PetrolPump.id == petrol_pump_id,
+        PetrolPump.is_active.is_(True)
+    ).first()
+
+    if not pump:
+        raise HTTPException(
+            status_code=404,
+            detail="Authorized petrol pump not found"
+        )
     normalized_type = photo_type.strip().upper() if photo_type else ""
     if normalized_type not in VALID_PHOTO_TYPES:
         raise HTTPException(
@@ -144,6 +214,7 @@ async def upload_photo(
     uploaded_photo = UploadedPhoto(
         id=photo_id,
         uploader_id=current_user.id,
+        petrol_pump_id=pump.id,
         photo_type=normalized_type,
         storage_type=saved["storage_type"],
         storage_reference=saved["storage_reference"],
@@ -263,7 +334,27 @@ def create_fuel_entry(
        with database-level protection against concurrent reuse.
     7. Creates `FuelEntry`, `EntryPhoto`, and `AuditLog` records atomically.
     """
-    # 1. Verify Vehicle
+        # Validate prior GPS verification
+    if not validate_gps_verification_token(
+        token=entry_in.gps_verification_token,
+        user_id=current_user.id,
+        pump_id=entry_in.petrol_pump_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid or expired GPS verification. Please verify your location again."
+        )
+    # 1. Verify Vehicle (on SQLite, acquire write lock first so concurrent
+    #    transactions serialize cleanly without snapshot-upgrade deadlocks)
+    if db.bind is not None and db.bind.dialect.name == "sqlite":
+        db.query(Vehicle).filter(
+            Vehicle.id == entry_in.vehicle_id,
+            Vehicle.is_active.is_(True),
+        ).update(
+            {Vehicle.is_active: Vehicle.is_active},
+            synchronize_session=False,
+        )
+
     vehicle = (
         db.query(Vehicle)
         .filter(
@@ -367,6 +458,11 @@ def create_fuel_entry(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied. Attached photos must belong to the authenticated operator.",
             )
+        if uploaded.petrol_pump_id != entry_in.petrol_pump_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Photo does not belong to the verified petrol pump. Please capture it again."
+            )
         if uploaded.photo_type != photo_in.photo_type:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -378,7 +474,18 @@ def create_fuel_entry(
                 detail=f"Photo '{resolved_id}' has already been used in another fuel entry.",
             )
 
-    # 6. Mileage & Distance Computation
+    # 6. OCR Verification (flags mismatches or unreadable images for owner review)
+    photos_by_type = {
+        photo_in.photo_type: photo_map[resolved_id]
+        for photo_in, resolved_id in resolved_items
+    }
+    ocr_summary = _evaluate_entry_ocr(
+        photos_by_type=photos_by_type,
+        current_odometer=entry_in.current_odometer,
+        fuel_litres=entry_in.fuel_litres,
+    )
+
+    # 7. Mileage & Distance Computation
     distance_km = round(entry_in.current_odometer - previous_odometer, 2)
     mileage_kmpl = None
 
@@ -395,6 +502,11 @@ def create_fuel_entry(
         )
 
         if previous_full_entry:
+            if previous_full_entry.current_odometer >= entry_in.current_odometer:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid odometer reading! Current ({entry_in.current_odometer} km) must be greater than previous ({previous_full_entry.current_odometer} km).",
+                )
             partial_fuel = (
                 db.query(func.sum(FuelEntry.fuel_litres))
                 .filter(
@@ -415,7 +527,7 @@ def create_fuel_entry(
                 is_full_tank=True,
             )
 
-    # 7. Save Core Fuel Entry & atomically claim uploaded photos
+    # 8. Save Core Fuel Entry & atomically claim uploaded photos
     new_entry = FuelEntry(
         vehicle_id=vehicle.id,
         petrol_pump_id=pump.id,
@@ -431,6 +543,12 @@ def create_fuel_entry(
         accuracy_m=entry_in.accuracy_m,
         distance_from_pump_m=round(distance_from_pump, 2),
         is_location_verified=is_verified,
+        ocr_odometer_status=ocr_summary["ocr_odometer_status"],
+        ocr_odometer_value=ocr_summary["ocr_odometer_value"],
+        ocr_fuel_status=ocr_summary["ocr_fuel_status"],
+        ocr_fuel_value=ocr_summary["ocr_fuel_value"],
+        needs_manual_review=ocr_summary["needs_manual_review"],
+        ocr_notes=ocr_summary["ocr_notes"],
         status="PENDING",
     )
 
@@ -474,11 +592,16 @@ def create_fuel_entry(
 
         db.add_all(photos_to_add)
 
+        review_note = (
+            f" | OCR flagged for review: {ocr_summary['ocr_notes']}"
+            if ocr_summary["needs_manual_review"]
+            else " | OCR verified"
+        )
         log = AuditLog(
             fuel_entry_id=new_entry.id,
             action="CREATED",
             performed_by=current_user.id,
-            remarks=f"Fuel entry recorded by '{current_user.username}' for vehicle '{vehicle.vehicle_number}' with {len(photos_to_add)} photo(s)",
+            remarks=f"Fuel entry recorded by '{current_user.username}' for vehicle '{vehicle.vehicle_number}' with {len(photos_to_add)} photo(s){review_note}",
         )
         db.add(log)
         db.commit()
@@ -577,6 +700,12 @@ def verify_fuel_entry(
     Allows the Owner to Approve or Reject a fuel entry.
     Records the decision in the audit log.
     """
+    if db.bind is not None and db.bind.dialect.name == "sqlite":
+        db.query(FuelEntry).filter(FuelEntry.id == id).update(
+            {FuelEntry.status: FuelEntry.status},
+            synchronize_session=False,
+        )
+
     entry = db.query(FuelEntry).filter(FuelEntry.id == id).first()
     if not entry:
         raise HTTPException(status_code=404, detail="Fuel entry not found")
@@ -597,10 +726,33 @@ def verify_fuel_entry(
                 status_code=400,
                 detail="Rejection reason is required",
             )
-    entry.status = verify_in.status
-    entry.rejection_reason = verify_in.rejection_reason if verify_in.status == "REJECTED" else None
-    entry.reviewed_by = owner.id
-    entry.reviewed_at = datetime.now(timezone.utc)
+
+    reviewed_at = datetime.now(timezone.utc)
+    rejection_reason = verify_in.rejection_reason if verify_in.status == "REJECTED" else None
+
+    updated_rows = (
+        db.query(FuelEntry)
+        .filter(FuelEntry.id == entry.id, FuelEntry.status == "PENDING")
+        .update(
+            {
+                FuelEntry.status: verify_in.status,
+                FuelEntry.rejection_reason: rejection_reason,
+                FuelEntry.reviewed_by: owner.id,
+                FuelEntry.reviewed_at: reviewed_at,
+                FuelEntry.mileage_kmpl: None if verify_in.status == "REJECTED" else entry.mileage_kmpl,
+            },
+            synchronize_session=False,
+        )
+    )
+    if updated_rows != 1:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Fuel entry has already been reviewed",
+        )
+
+    db.expire(entry)
+    entry = db.query(FuelEntry).filter(FuelEntry.id == id).one()
 
     log = AuditLog(
         fuel_entry_id=entry.id,
@@ -611,7 +763,6 @@ def verify_fuel_entry(
     db.add(log)
 
     if entry.status == "REJECTED":
-        entry.mileage_kmpl = None
         db.flush()
         recalculate_vehicle_mileage(db, entry.vehicle_id)
 
@@ -713,6 +864,12 @@ def _format_entry_response(entry: FuelEntry, vehicle: Vehicle, pump: PetrolPump,
         "accuracy_m": entry.accuracy_m,
         "distance_from_pump_m": entry.distance_from_pump_m,
         "is_location_verified": entry.is_location_verified,
+        "ocr_odometer_status": entry.ocr_odometer_status,
+        "ocr_odometer_value": entry.ocr_odometer_value,
+        "ocr_fuel_status": entry.ocr_fuel_status,
+        "ocr_fuel_value": entry.ocr_fuel_value,
+        "needs_manual_review": bool(entry.needs_manual_review),
+        "ocr_notes": entry.ocr_notes,
         "status": entry.status,
         "rejection_reason": entry.rejection_reason,
         "reviewed_by": entry.reviewed_by,
@@ -764,9 +921,14 @@ def verify_location(
     )
 
     return {
-        "is_location_verified": True,
-        "petrol_pump_id": pump.id,
-        "petrol_pump_name": pump.name,
-        "distance_from_pump_m": round(distance, 2),
-        "message": "Location verified. Camera capture allowed.",
-    }
+    "is_location_verified": True,
+    "petrol_pump_id": pump.id,
+    "petrol_pump_name": pump.name,
+    "distance_from_pump_m": round(distance, 2),
+    "gps_verification_token": create_gps_verification_token(
+        user_id=current_user.id,
+        pump_id=pump.id
+    ),
+    "expires_in": 900,
+    "message": "Location verified. Camera capture allowed.",
+}

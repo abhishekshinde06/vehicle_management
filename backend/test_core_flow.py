@@ -251,7 +251,23 @@ def isolate_photo_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
 
 
-def upload_test_photo(client, headers, photo_type):
+def get_gps_token(client, headers, pump):
+    response = client.post(
+        "/api/fuel-entries/verify-location",
+        headers=headers,
+        json={
+            "petrol_pump_id": pump["id"],
+            "latitude": pump["latitude"],
+            "longitude": pump["longitude"],
+            "accuracy_m": 10.0,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    return response.json()["gps_verification_token"]
+
+
+def upload_test_photo(client, headers, photo_type, pump_id, gps_token):
     buffer = io.BytesIO()
 
     Image.new("RGB", (100, 100), "white").save(
@@ -262,7 +278,11 @@ def upload_test_photo(client, headers, photo_type):
 
     response = client.post(
         "/api/fuel-entries/upload-photo",
-        data={"photo_type": photo_type},
+        data={
+            "photo_type": photo_type,
+            "petrol_pump_id": pump_id,
+            "gps_verification_token": gps_token,
+        },
         files={
             "file": ("test.jpg", buffer, "image/jpeg")
         },
@@ -273,12 +293,12 @@ def upload_test_photo(client, headers, photo_type):
     return response.json()
 
 
-def upload_three_photos(client, headers):
+def upload_three_photos(client, headers, pump_id, gps_token):
     return [
         {
             "photo_type": photo_type,
             "photo_url": upload_test_photo(
-                client, headers, photo_type
+                client, headers, photo_type, pump_id, gps_token
             )["photo_url"],
         }
         for photo_type in ("PLATE", "ODOMETER", "RECEIPT")
@@ -297,7 +317,17 @@ def test_photo_upload():
         "Authorization": f"Bearer {login['access_token']}"
     }
 
-    data = upload_test_photo(client, headers, "PLATE")
+    pumps_res = client.get(
+        "/api/petrol-pumps/", headers=headers
+    )
+    assert pumps_res.status_code == 200
+
+    pump = pumps_res.json()[0]
+    gps_token = get_gps_token(client, headers, pump)
+
+    data = upload_test_photo(
+        client, headers, "PLATE", pump["id"], gps_token
+    )
 
     assert "photo_id" in data
     assert "photo_url" in data
@@ -340,16 +370,25 @@ def test_fuel_entry_and_mileage_calculation():
     assert v_res.status_code == 200, v_res.text
     vehicles = v_res.json()
     assert len(vehicles) >= 1
-    vehicle = vehicles[0]
+    vehicle = next(
+        v for v in vehicles
+        if v["vehicle_number"] == "MH-12-AB-1001"
+    )
 
     p_res = client.get("/api/petrol-pumps/", headers=headers)
     assert p_res.status_code == 200, p_res.text
     pumps = p_res.json()
     assert len(pumps) >= 1
-    pump = pumps[0]
+    pump = next(
+        p for p in pumps
+        if p["name"] == "Bharat Petroleum - Highway Hub"
+    )
+
+    gps_token = get_gps_token(client, headers, pump)
 
     # Initial odometer is 45000. Let's record 45600 with 100 Litres + 3 attached photos + GPS
     entry_payload = {
+        "gps_verification_token": gps_token,
         "vehicle_id": vehicle["id"],
         "petrol_pump_id": pump["id"],
         "current_odometer": 45600.0,
@@ -358,7 +397,10 @@ def test_fuel_entry_and_mileage_calculation():
         "latitude": pump["latitude"] + 0.0001,  # ~11 meters away
         "longitude": pump["longitude"] + 0.0001,
         "accuracy_m": 10.0,
-        "photos": upload_three_photos(client, headers)    }
+        "photos": upload_three_photos(
+            client, headers, pump["id"], gps_token
+        ),
+    }
 
     create_res = client.post("/api/fuel-entries/", json=entry_payload, headers=headers)
     assert create_res.status_code == 201, create_res.text
@@ -382,6 +424,7 @@ def test_fuel_entry_and_mileage_calculation():
 
     # 3. Test Decreasing Odometer validation (must fail)
     invalid_payload = {
+        "gps_verification_token": gps_token,
         "vehicle_id": vehicle["id"],
         "petrol_pump_id": pump["id"],
         "current_odometer": 45500.0,  # Lower than 45600!
@@ -390,11 +433,9 @@ def test_fuel_entry_and_mileage_calculation():
         "latitude": pump["latitude"] + 0.0001,
         "longitude": pump["longitude"] + 0.0001,
         "accuracy_m": 10.0,
-        "photos": [
-            {"photo_type": "PLATE", "photo_url": "/uploads/test_plate2.jpg"},
-            {"photo_type": "ODOMETER", "photo_url": "/uploads/test_odometer2.jpg"},
-            {"photo_type": "RECEIPT", "photo_url": "/uploads/test_receipt2.jpg"}
-        ]
+        "photos": upload_three_photos(
+            client, headers, pump["id"], gps_token
+        ),
     }
     invalid_res = client.post("/api/fuel-entries/", json=invalid_payload, headers=headers)
     assert invalid_res.status_code == 400

@@ -10,7 +10,7 @@ This module handles all cryptographic security operations:
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Union, Any
 import bcrypt
-from jose import jwt
+from jose import jwt,JWTError
 from app.core.config import settings
 
 
@@ -71,9 +71,52 @@ def create_access_token(subject: Union[str, Any], role: str, expires_delta: Opti
         expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     
     to_encode = {
-        "exp": expire,
-        "sub": str(subject),
-        "role": role
+    "exp": expire,
+    "sub": str(subject),
+    "role": role,
+    "purpose": "access"
     }
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
+
+def create_gps_verification_token(
+    user_id: str,
+    pump_id: str
+) -> str:
+
+    now = datetime.now(timezone.utc)
+
+    payload = {
+        "sub": str(user_id),
+        "pump_id": str(pump_id),
+        "purpose": "gps_verification",
+        "iat": now,
+        "exp": now + timedelta(minutes=15)
+    }
+
+    return jwt.encode(
+        payload,
+        settings.SECRET_KEY,
+        algorithm=settings.ALGORITHM
+    )
+def validate_gps_verification_token(
+    token: str,
+    user_id: str,
+    pump_id: str
+) -> bool:
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+            options={"require_exp": True}
+        )
+
+        return (
+            payload.get("purpose") == "gps_verification"
+            and payload.get("sub") == str(user_id)
+            and payload.get("pump_id") == str(pump_id)
+        )
+
+    except JWTError:
+        return False
