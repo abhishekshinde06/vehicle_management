@@ -3,11 +3,7 @@ import { Link } from 'react-router-dom';
 import { getVehicles } from '../../api/vehicles';
 import { getPetrolPumps } from '../../api/petrolPumps';
 import { createFuelEntry, verifyLocation } from '../../api/fuelEntries';
-import {
-  isSecurePhotoUploadAvailable,
-  PHOTO_UPLOAD_DEPENDENCY_NOTICE,
-  uploadFuelPhoto,
-} from '../../api/photoUpload';
+import { uploadFuelPhoto } from '../../api/photoUpload';
 import { useGeolocation } from '../../hooks/useGeolocation';
 import AlertBanner from '../../components/AlertBanner';
 import CameraCaptureCard from '../../components/CameraCaptureCard';
@@ -52,6 +48,7 @@ export default function OperatorDashboardPage() {
   const [isVerifyingLocation, setIsVerifyingLocation] = useState(false);
   const [locationVerification, setLocationVerification] = useState(null);
   const [locationVerifyError, setLocationVerifyError] = useState('');
+  const [verificationClock, setVerificationClock] = useState(Date.now());
 
   const [photos, setPhotos] = useState({
     PLATE: null,
@@ -69,8 +66,6 @@ export default function OperatorDashboardPage() {
   const [submitError, setSubmitError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submittedEntry, setSubmittedEntry] = useState(null);
-
-  const secureUploadAvailable = isSecurePhotoUploadAvailable();
 
   const loadMasterData = useCallback(async () => {
     setLoadingMaster(true);
@@ -92,6 +87,12 @@ export default function OperatorDashboardPage() {
   useEffect(() => {
     loadMasterData();
   }, [loadMasterData]);
+
+  useEffect(() => {
+    if (!locationVerification?.expires_at) return undefined;
+    const timer = window.setInterval(() => setVerificationClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [locationVerification]);
 
   useEffect(() => {
     return () => {
@@ -144,7 +145,21 @@ export default function OperatorDashboardPage() {
         longitude: coords.longitude,
         accuracy_m: coords.accuracy_m,
       });
-      setLocationVerification(result);
+      const expiresIn = Number(result?.expires_in);
+      if (
+        typeof result?.gps_verification_token !== 'string' ||
+        !result.gps_verification_token ||
+        !Number.isFinite(expiresIn) ||
+        expiresIn <= 0
+      ) {
+        setLocationVerifyError('The server did not return a valid GPS verification token.');
+        return;
+      }
+      setVerificationClock(Date.now());
+      setLocationVerification({
+        ...result,
+        expires_at: Date.now() + expiresIn * 1000,
+      });
     } catch (err) {
       setLocationVerification(null);
       const status = err.response?.status;
@@ -181,7 +196,14 @@ export default function OperatorDashboardPage() {
   const allThreePhotosCaptured = Boolean(
     photos.PLATE?.blob && photos.ODOMETER?.blob && photos.RECEIPT?.blob
   );
-  const isLocationVerified = Boolean(locationVerification?.is_location_verified);
+  const secondsUntilExpiry = locationVerification?.expires_at
+    ? Math.max(0, Math.ceil((locationVerification.expires_at - verificationClock) / 1000))
+    : 0;
+  const isLocationVerified = Boolean(
+    locationVerification?.is_location_verified &&
+      locationVerification?.gps_verification_token &&
+      secondsUntilExpiry > 0
+  );
 
   const validateFuelDetails = () => {
     const odo = Number(currentOdometer);
@@ -207,14 +229,19 @@ export default function OperatorDashboardPage() {
     setFormError('');
     setSubmitError('');
 
-    const validationMessage = validateFuelDetails();
-    if (validationMessage) {
-      setFormError(validationMessage);
+    if (
+      locationVerification?.is_location_verified &&
+      (!locationVerification.gps_verification_token || secondsUntilExpiry <= 0)
+    ) {
+      setLocationVerification(null);
+      setLocationVerifyError('Your GPS verification token expired. Verify your live location again.');
+      setSubmitError('GPS verification expired. Re-verify your live location before submitting.');
       return;
     }
 
-    if (!secureUploadAvailable) {
-      setSubmitError(PHOTO_UPLOAD_DEPENDENCY_NOTICE);
+    const validationMessage = validateFuelDetails();
+    if (validationMessage) {
+      setFormError(validationMessage);
       return;
     }
 
@@ -227,14 +254,24 @@ export default function OperatorDashboardPage() {
 
       // Upload all three mandatory photos via modular upload adapter
       const uploadedPhotos = await Promise.all([
-        uploadFuelPhoto(photos.PLATE.blob, 'PLATE'),
-        uploadFuelPhoto(photos.ODOMETER.blob, 'ODOMETER'),
-        uploadFuelPhoto(photos.RECEIPT.blob, 'RECEIPT'),
+        uploadFuelPhoto(photos.PLATE.blob, 'PLATE', {
+          petrolPumpId: selectedPumpId,
+          gpsVerificationToken: locationVerification.gps_verification_token,
+        }),
+        uploadFuelPhoto(photos.ODOMETER.blob, 'ODOMETER', {
+          petrolPumpId: selectedPumpId,
+          gpsVerificationToken: locationVerification.gps_verification_token,
+        }),
+        uploadFuelPhoto(photos.RECEIPT.blob, 'RECEIPT', {
+          petrolPumpId: selectedPumpId,
+          gpsVerificationToken: locationVerification.gps_verification_token,
+        }),
       ]);
 
       const payload = {
         vehicle_id: selectedVehicleId,
         petrol_pump_id: selectedPumpId,
+        gps_verification_token: locationVerification.gps_verification_token,
         current_odometer: Number(currentOdometer),
         fuel_litres: Number(fuelLitres),
         is_full_tank: Boolean(isFullTank),
@@ -248,7 +285,14 @@ export default function OperatorDashboardPage() {
       setSubmittedEntry(created);
       loadMasterData();
     } catch (err) {
-      setSubmitError(extractApiError(err, err.message || 'Failed to submit fuel entry.'));
+      const message = extractApiError(err, err.message || 'Failed to submit fuel entry.');
+      if (err.response?.status === 403 && /invalid or expired gps verification/i.test(message)) {
+        setLocationVerification(null);
+        setLocationVerifyError('Your GPS verification token expired. Verify your live location again.');
+        setSubmitError(`${message} Verify your live location again before retrying.`);
+      } else {
+        setSubmitError(message);
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -534,7 +578,18 @@ export default function OperatorDashboardPage() {
                   | GPS Accuracy: <strong>±{Math.round(gpsPosition.accuracy_m)} m</strong>
                 </>
               )}
+              {' '}
+              | Token expires in{' '}
+              <strong>
+                {Math.floor(secondsUntilExpiry / 60)}:
+                {String(secondsUntilExpiry % 60).padStart(2, '0')}
+              </strong>
             </p>
+          </AlertBanner>
+        )}
+        {locationVerification?.is_location_verified && !isLocationVerified && (
+          <AlertBanner variant="warning" title="GPS Verification Expired">
+            Verify your live location again to unlock camera capture and submit this entry.
           </AlertBanner>
         )}
       </section>
@@ -550,12 +605,6 @@ export default function OperatorDashboardPage() {
             Capture all three photos directly with your tablet camera. Gallery uploads are disabled.
           </p>
         </div>
-
-        {!secureUploadAvailable && (
-          <AlertBanner variant="warning" title="Pending Backend Dependency: Secure Photo Upload">
-            {PHOTO_UPLOAD_DEPENDENCY_NOTICE}
-          </AlertBanner>
-        )}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {PHOTO_SLOTS.map((slot) => (
@@ -687,15 +736,9 @@ export default function OperatorDashboardPage() {
           </AlertBanner>
         )}
 
-        {!secureUploadAvailable && (
-          <AlertBanner variant="warning" title="Submission Disabled — Secure Photo Upload Pending">
-            Final submission cannot proceed until the backend secure photo upload module is available to store and return verified URLs for PLATE, ODOMETER, and RECEIPT photos.
-          </AlertBanner>
-        )}
-
         <button
           type="submit"
-          disabled={!secureUploadAvailable || isSubmitting || isLocating}
+          disabled={isSubmitting || isLocating}
           className="w-full rounded-xl bg-emerald-600 px-6 py-4 text-lg font-bold text-white shadow-xs hover:bg-emerald-700 disabled:bg-slate-300 disabled:text-slate-600 disabled:cursor-not-allowed transition-colors"
         >
           {isSubmitting ? 'Capturing Fresh GPS & Submitting...' : 'Submit Fuel Entry'}

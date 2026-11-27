@@ -1,56 +1,34 @@
 import apiClient, { getBackendOrigin } from './client';
 
-/**
- * Modular Photo Upload & Secure Retrieval Adapter
- * ------------------------------------------------
- * Pending backend dependency:
- * The production secure photo upload module (e.g. authenticated S3 presigned
- * uploads and secure photo retrieval URLs) is still under development.
- *
- * By default, `isSecurePhotoUploadAvailable()` returns `false` so that:
- * - No fake photo URLs are ever generated.
- * - Final fuel entry submission is blocked with a clear dependency message.
- *
- * For local development testing against the temporary multipart endpoint
- * `POST /api/fuel-entries/upload-photo`, set `VITE_ENABLE_DEV_PHOTO_UPLOAD=true`.
- */
-
-export const PHOTO_UPLOAD_DEPENDENCY_NOTICE =
-  'Secure photo upload module is still under development on the backend. Live camera photos can be captured, previewed, and retaken locally, but final fuel entry submission is disabled until secure photo upload is enabled.';
-
-export function isSecurePhotoUploadAvailable() {
-  return import.meta.env.VITE_ENABLE_DEV_PHOTO_UPLOAD === 'true';
-}
-
-export async function uploadFuelPhoto(blob, photoType) {
-  if (!isSecurePhotoUploadAvailable()) {
-    const err = new Error(PHOTO_UPLOAD_DEPENDENCY_NOTICE);
-    err.code = 'SECURE_PHOTO_UPLOAD_UNAVAILABLE';
-    throw err;
-  }
-
+export async function uploadFuelPhoto(
+  blob,
+  photoType,
+  { petrolPumpId, gpsVerificationToken }
+) {
   if (!blob) {
     throw new Error(`Missing captured image for ${photoType}.`);
+  }
+  if (!petrolPumpId || !gpsVerificationToken) {
+    throw new Error('Verify your live GPS location before uploading photos.');
   }
 
   const formData = new FormData();
   const filename = `${photoType.toLowerCase()}_${Date.now()}.jpg`;
   formData.append('file', blob, filename);
+  formData.append('photo_type', photoType);
+  formData.append('petrol_pump_id', petrolPumpId);
+  formData.append('gps_verification_token', gpsVerificationToken);
 
-  const response = await apiClient.post('/fuel-entries/upload-photo', formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data',
-    },
-  });
+  const response = await apiClient.post('/fuel-entries/upload-photo', formData);
 
-  const photoUrl = response.data?.photo_url;
-  if (!photoUrl || typeof photoUrl !== 'string' || !photoUrl.trim()) {
-    throw new Error('Photo upload did not return a valid photo URL.');
+  const { photo_id: photoId, photo_type: uploadedType } = response.data || {};
+  if (!photoId || uploadedType !== photoType) {
+    throw new Error(`Photo upload did not return a valid ${photoType} photo reference.`);
   }
 
   return {
     photo_type: photoType,
-    photo_url: photoUrl.trim(),
+    photo_id: photoId,
   };
 }
 
@@ -66,4 +44,25 @@ export function resolvePhotoUrl(photoUrl) {
     return `${getBackendOrigin()}${trimmed}`;
   }
   return null;
+}
+
+export async function loadFuelPhoto(photoUrl) {
+  const resolvedUrl = resolvePhotoUrl(photoUrl);
+  if (!resolvedUrl) return null;
+
+  const resolved = new URL(resolvedUrl);
+  const apiBase = new URL(apiClient.defaults.baseURL);
+  const apiPath = apiBase.pathname.replace(/\/+$/, '');
+  const photoPathPrefix = `${apiPath}/fuel-entries/photos/`;
+
+  if (
+    resolved.origin !== getBackendOrigin() ||
+    !resolved.pathname.startsWith(photoPathPrefix)
+  ) {
+    return resolvedUrl;
+  }
+
+  const responsePath = resolved.pathname.slice(apiPath.length) + resolved.search;
+  const response = await apiClient.get(responsePath, { responseType: 'blob' });
+  return URL.createObjectURL(response.data);
 }

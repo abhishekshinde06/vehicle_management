@@ -2,15 +2,42 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { getFuelEntryById, verifyFuelEntry } from '../../api/fuelEntries';
 import { getPetrolPumps } from '../../api/petrolPumps';
-import { resolvePhotoUrl } from '../../api/photoUpload';
+import { loadFuelPhoto } from '../../api/photoUpload';
 import AlertBanner from '../../components/AlertBanner';
 import EntryLocationMap from '../../components/EntryLocationMap';
 import StatusBadge from '../../components/StatusBadge';
 import { extractApiError, formatDateTime, formatNumber } from '../../utils/formatters';
 
 function PhotoCard({ photoType, label, photoUrl }) {
+  const [imageUrl, setImageUrl] = useState(null);
   const [imageError, setImageError] = useState(false);
-  const resolved = resolvePhotoUrl(photoUrl);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl = null;
+    setImageUrl(null);
+    setImageError(false);
+
+    if (!photoUrl) return undefined;
+
+    loadFuelPhoto(photoUrl)
+      .then((url) => {
+        if (!active) {
+          if (url?.startsWith('blob:')) URL.revokeObjectURL(url);
+          return;
+        }
+        if (url?.startsWith('blob:')) objectUrl = url;
+        setImageUrl(url);
+      })
+      .catch(() => {
+        if (active) setImageError(true);
+      });
+
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [photoUrl]);
 
   return (
     <div className="rounded-xl border border-slate-200 bg-slate-50 overflow-hidden flex flex-col">
@@ -21,10 +48,10 @@ function PhotoCard({ photoType, label, photoUrl }) {
         </span>
       </div>
 
-      {resolved && !imageError ? (
+      {imageUrl && !imageError ? (
         <div className="aspect-video bg-slate-900">
           <img
-            src={resolved}
+            src={imageUrl}
             alt={`${label} (${photoType})`}
             onError={() => setImageError(true)}
             className="w-full h-full object-contain"
@@ -35,7 +62,7 @@ function PhotoCard({ photoType, label, photoUrl }) {
           <p className="font-semibold text-slate-700">Photo Unavailable for Preview</p>
           <p>
             {photoUrl
-              ? 'Secure photo retrieval is pending or this asset cannot be loaded.'
+              ? 'The secure photo could not be loaded. Refresh the entry and try again.'
               : 'No photo URL recorded.'}
           </p>
           {photoUrl && (
@@ -46,6 +73,25 @@ function PhotoCard({ photoType, label, photoUrl }) {
         </div>
       )}
     </div>
+  );
+}
+
+function OcrStatus({ status }) {
+  const styles = {
+    MATCH: 'bg-emerald-100 text-emerald-800 border-emerald-200',
+    MISMATCH: 'bg-red-100 text-red-800 border-red-200',
+    UNREADABLE: 'bg-amber-100 text-amber-800 border-amber-200',
+  };
+  const normalized = status || 'PENDING';
+
+  return (
+    <span
+      className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-bold ${
+        styles[normalized] || 'bg-slate-100 text-slate-700 border-slate-200'
+      }`}
+    >
+      {normalized}
+    </span>
   );
 }
 
@@ -284,8 +330,20 @@ export default function OwnerFuelEntryDetailPage() {
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-lg font-bold text-slate-900">Mileage &amp; Refill Details</h2>
-          <span className="text-xs font-medium text-slate-500 bg-slate-100 px-2.5 py-1 rounded-md">
-            Automated OCR verification: Pending backend integration
+          <span
+            className={`rounded-md px-2.5 py-1 text-xs font-bold ${
+              entry.needs_manual_review
+                ? 'bg-amber-100 text-amber-800'
+                : entry.ocr_odometer_status || entry.ocr_fuel_status
+                  ? 'bg-emerald-100 text-emerald-800'
+                  : 'bg-slate-100 text-slate-600'
+            }`}
+          >
+            {entry.needs_manual_review
+              ? 'Manual Review Recommended'
+              : entry.ocr_odometer_status || entry.ocr_fuel_status
+                ? 'OCR Verification Complete'
+                : 'OCR Results Unavailable'}
           </span>
         </div>
 
@@ -327,6 +385,39 @@ export default function OwnerFuelEntryDetailPage() {
             </dd>
           </div>
         </dl>
+
+        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+          <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+            <dt className="text-xs text-slate-500">Odometer Photo OCR</dt>
+            <dd className="mt-1 flex flex-wrap items-center gap-2">
+              <OcrStatus status={entry.ocr_odometer_status} />
+              <span className="font-semibold text-slate-900">
+                {entry.ocr_odometer_value != null
+                  ? `${formatNumber(entry.ocr_odometer_value)} km detected`
+                  : 'No readable value detected'}
+              </span>
+            </dd>
+          </div>
+          <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+            <dt className="text-xs text-slate-500">Fuel Receipt OCR</dt>
+            <dd className="mt-1 flex flex-wrap items-center gap-2">
+              <OcrStatus status={entry.ocr_fuel_status} />
+              <span className="font-semibold text-slate-900">
+                {entry.ocr_fuel_value != null
+                  ? `${formatNumber(entry.ocr_fuel_value)} L detected`
+                  : 'No readable value detected'}
+              </span>
+            </dd>
+          </div>
+        </dl>
+        {entry.ocr_notes && (
+          <AlertBanner
+            variant={entry.needs_manual_review ? 'warning' : 'success'}
+            title="OCR Verification Notes"
+          >
+            {entry.ocr_notes}
+          </AlertBanner>
+        )}
       </section>
 
       {/* Photos */}
@@ -334,7 +425,7 @@ export default function OwnerFuelEntryDetailPage() {
         <div>
           <h2 className="text-lg font-bold text-slate-900">Captured Evidence Photos</h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Photos are displayed when secure photo retrieval is available for the stored references.
+            Secure evidence photos are loaded using your authenticated owner session.
           </p>
         </div>
 
