@@ -16,23 +16,139 @@ Automated integration tests validating:
 """
 
 import io
+import os
+import tempfile
 import pytest
-from fastapi.testclient import TestClient
-from app.main import app
-from app.core.database import Base, engine
-from seed import seed_database
 
+# Create an isolated temporary test database (never drops or modifies the application database)
+_test_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+_test_db.close()
+os.environ["DATABASE_URL"] = f"sqlite:///{_test_db.name}"
+
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.main import app
+from app.core.database import Base, get_db
+from app.core.security import get_password_hash
+from app.models import User, Vehicle, PetrolPump, FuelEntry, AuditLog
+
+test_engine = create_engine(
+    f"sqlite:///{_test_db.name}",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool
+)
+TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+
+def override_get_db():
+    db = TestSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+app.dependency_overrides[get_db] = override_get_db
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def ensure_test_db_override():
+    """Ensure the isolated test database dependency override is active for every test."""
+    app.dependency_overrides[get_db] = override_get_db
+    yield
+    app.dependency_overrides.pop(get_db, None)
 
 
 def setup_module():
     """
     Setup hook executed once before running the test suite:
-    Resets tables and re-seeds the database to ensure a clean, isolated test environment.
+    Resets tables on isolated test_engine and seeds test records.
+    Never drops or modifies the actual application database.
     """
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
-    seed_database()
+    Base.metadata.drop_all(bind=test_engine)
+    Base.metadata.create_all(bind=test_engine)
+
+    db = TestSessionLocal()
+    try:
+        op = User(
+            username="operator",
+            password_hash=get_password_hash("operator123"),
+            role="operator",
+            full_name="Tablet Operator (Ramesh)",
+            is_active=True
+        )
+        owner = User(
+            username="owner",
+            password_hash=get_password_hash("owner123"),
+            role="owner",
+            full_name="Fleet Owner (Vikram)",
+            is_active=True
+        )
+        db.add_all([op, owner])
+
+        vehicles = [
+            Vehicle(vehicle_number="MH-12-AB-1001", model="Tata Prima 4028.S", initial_odometer=44000.0),
+            Vehicle(vehicle_number="MH-14-XY-2002", model="Ashok Leyland 3118", initial_odometer=72500.0),
+            Vehicle(vehicle_number="MH-46-TR-3003", model="BharatBenz 2823R", initial_odometer=28900.0),
+        ]
+        db.add_all(vehicles)
+        db.flush()
+
+        pumps = [
+            PetrolPump(
+                name="Bharat Petroleum - Highway Hub",
+                address="NH-48, Near Expressway Toll, Pune",
+                latitude=18.5204,
+                longitude=73.8567,
+                radius_meters=150.0
+            ),
+            PetrolPump(
+                name="Indian Oil - Transporter Hub",
+                address="Transport Nagar, Nigdi, Pune",
+                latitude=18.6510,
+                longitude=73.7820,
+                radius_meters=100.0
+            )
+        ]
+        db.add_all(pumps)
+        db.flush()
+
+        # Seed initial baseline full-tank entry for first vehicle at 45000 km
+        baseline = FuelEntry(
+            vehicle_id=vehicles[0].id,
+            petrol_pump_id=pumps[0].id,
+            operator_id=op.id,
+            current_odometer=45000.0,
+            previous_odometer=44000.0,
+            fuel_litres=100.0,
+            is_full_tank=True,
+            distance_km=1000.0,
+            mileage_kmpl=None,
+            latitude=18.5204,
+            longitude=73.8567,
+            accuracy_m=10.0,
+            distance_from_pump_m=0.0,
+            is_location_verified=True,
+            status="APPROVED"
+        )
+        db.add(baseline)
+
+        db.commit()
+    finally:
+        db.close()
+
+
+def teardown_module():
+    app.dependency_overrides.pop(get_db, None)
+    Base.metadata.drop_all(bind=test_engine)
+    test_engine.dispose()
+    if os.path.exists(_test_db.name):
+        try:
+            os.remove(_test_db.name)
+        except OSError:
+            pass
 
 
 def test_public_signup_disabled_and_operator_provisioning():
@@ -227,7 +343,15 @@ def test_fuel_entry_and_mileage_calculation():
         "petrol_pump_id": pump["id"],
         "current_odometer": 45500.0,  # Lower than 45600!
         "fuel_litres": 50.0,
-        "is_full_tank": True
+        "is_full_tank": True,
+        "latitude": pump["latitude"] + 0.0001,
+        "longitude": pump["longitude"] + 0.0001,
+        "accuracy_m": 10.0,
+        "photos": [
+            {"photo_type": "PLATE", "photo_url": "/uploads/test_plate2.jpg"},
+            {"photo_type": "ODOMETER", "photo_url": "/uploads/test_odometer2.jpg"},
+            {"photo_type": "RECEIPT", "photo_url": "/uploads/test_receipt2.jpg"}
+        ]
     }
     invalid_res = client.post("/api/fuel-entries/", json=invalid_payload, headers=headers)
     assert invalid_res.status_code == 400
